@@ -97,22 +97,28 @@ class ConstituencyParserPredictor(Predictor):
 
         # format the NLTK tree as a string on a single line.
         tree = return_dict.pop("trees")
-        return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
+        # return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
         return_dict["trees"] = tree.pformat(margin=1000000)
-        return sanitize(return_dict)
+        # Only keep "trees"
+        tree_str = return_dict["trees"]
+        # return sanitize(return_dict)
+        return tree_str
 
     @overrides
     def predict_batch_json(self, inputs: List[JsonDict]) -> List[JsonDict]:
         instances, return_dicts = zip(*self._batch_json_to_instances(inputs))
         outputs = self._model.forward_on_instances(instances)
+        tree_strs = []
         for output, return_dict in zip(outputs, return_dicts):
             return_dict.update(output)
             # format the NLTK tree as a string on a single line.
             tree = return_dict.pop("trees")
-            return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
+            # return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
             return_dict["trees"] = tree.pformat(margin=1000000)
-        return sanitize(return_dicts)
-
+            tree_str = return_dict["trees"]
+            tree_strs.append(tree_str)
+        # return sanitize(new_return_dicts)
+        return tree_strs
 
     def _build_hierplane_tree(self, tree: Tree, index: int, is_root: bool) -> JsonDict:
         """
