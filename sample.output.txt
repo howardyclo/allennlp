@@ -1,0 +1,1 @@
+"(S (NP (PRP He)) (VP (VBZ likes) (S (VP (TO to) (VP (VB discuss) (NP (DT the) (NNS issues)))))) (. .))"
