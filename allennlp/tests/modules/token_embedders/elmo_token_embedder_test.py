@@ -39,10 +39,6 @@ class TestElmoTokenEmbedder(ModelTestCase):
 
     def test_file_archiving(self):
         # This happens to be a good place to test auxiliary file archiving.
-        initial_working_dir = os.getcwd()
-        # Change directory to module root.
-        os.chdir(self.MODULE_ROOT)
-
         # Train the model
         params = Params.from_file(self.FIXTURES_ROOT / 'elmo' / 'config' / 'characters_token_embedder.json')
         serialization_dir = os.path.join(self.TEST_DIR, 'serialization')
@@ -58,23 +54,21 @@ class TestElmoTokenEmbedder(ModelTestCase):
         fta_file = os.path.join(unarchive_dir, 'files_to_archive.json')
         assert os.path.exists(fta_file)
 
-        # Which should properly contain { hocon_key -> original_filename }
+        # Which should properly contain { flattened_key -> original_filename }
         with open(fta_file) as fta:
             files_to_archive = json.loads(fta.read())
 
         assert files_to_archive == {
-                'model.text_field_embedder.elmo.options_file': str(pathlib.Path('tests') / 'fixtures' /
-                                                                   'elmo' / 'options.json'),
-                'model.text_field_embedder.elmo.weight_file': str(pathlib.Path('tests') / 'fixtures' /
-                                                                  'elmo' / 'lm_weights.hdf5'),
+                'model.text_field_embedder.token_embedders.elmo.options_file':
+                        str(pathlib.Path('allennlp') / 'tests' / 'fixtures' / 'elmo' / 'options.json'),
+                'model.text_field_embedder.token_embedders.elmo.weight_file':
+                        str(pathlib.Path('allennlp') / 'tests' / 'fixtures' / 'elmo' / 'lm_weights.hdf5'),
         }
 
         # Check that the unarchived contents of those files match the original contents.
         for key, original_filename in files_to_archive.items():
             new_filename = os.path.join(unarchive_dir, "fta", key)
             assert filecmp.cmp(original_filename, new_filename)
-        # Change directory back to what it was initially
-        os.chdir(initial_working_dir)
 
     def test_forward_works_with_projection_layer(self):
         params = Params({
@@ -93,6 +87,8 @@ class TestElmoTokenEmbedder(ModelTestCase):
         word2[2] = 1
         word2[3] = 0
         embedding_layer = ElmoTokenEmbedder.from_params(vocab=None, params=params)
+        assert embedding_layer.get_output_dim() == 20
+
         input_tensor = torch.LongTensor([[word1, word2]])
         embedded = embedding_layer(input_tensor).data.numpy()
         assert embedded.shape == (1, 2, 20)

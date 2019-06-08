@@ -5,17 +5,169 @@ logging and validation.
 """
 
 from typing import Any, Dict, List
-from collections import MutableMapping
+from collections import MutableMapping, OrderedDict
 import copy
-
+import json
 import logging
-import pyhocon
+import os
+import zlib
 
 from overrides import overrides
+
+# _jsonnet doesn't work on Windows, so we have to use fakes.
+try:
+    from _jsonnet import evaluate_file, evaluate_snippet
+except ImportError:
+    def evaluate_file(filename: str, **_kwargs) -> str:
+        logger.warning(f"_jsonnet not loaded, treating {filename} as json")
+        with open(filename, 'r') as evaluation_file:
+            return evaluation_file.read()
+
+    def evaluate_snippet(_filename: str, expr: str, **_kwargs) -> str:
+        logger.warning(f"_jsonnet not loaded, treating snippet as json")
+        return expr
+
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+
+# pylint: disable=inconsistent-return-statements
+def infer_and_cast(value: Any):
+    """
+    In some cases we'll be feeding params dicts to functions we don't own;
+    for example, PyTorch optimizers. In that case we can't use ``pop_int``
+    or similar to force casts (which means you can't specify ``int`` parameters
+    using environment variables). This function takes something that looks JSON-like
+    and recursively casts things that look like (bool, int, float) to (bool, int, float).
+    """
+    # pylint: disable=too-many-return-statements
+    if isinstance(value, (int, float, bool)):
+        # Already one of our desired types, so leave as is.
+        return value
+    elif isinstance(value, list):
+        # Recursively call on each list element.
+        return [infer_and_cast(item) for item in value]
+    elif isinstance(value, dict):
+        # Recursively call on each dict value.
+        return {key: infer_and_cast(item) for key, item in value.items()}
+    elif isinstance(value, str):
+        # If it looks like a bool, make it a bool.
+        if value.lower() == "true":
+            return True
+        elif value.lower() == "false":
+            return False
+        else:
+            # See if it could be an int.
+            try:
+                return int(value)
+            except ValueError:
+                pass
+            # See if it could be a float.
+            try:
+                return float(value)
+            except ValueError:
+                # Just return it as a string.
+                return value
+    else:
+        raise ValueError(f"cannot infer type of {value}")
+# pylint: enable=inconsistent-return-statements
+
+def _is_encodable(value: str) -> bool:
+    """
+    We need to filter out environment variables that can't
+    be unicode-encoded to avoid a "surrogates not allowed"
+    error in jsonnet.
+    """
+    # Idiomatically you'd like to not check the != b""
+    # but mypy doesn't like that.
+    return (value == "") or (value.encode('utf-8', 'ignore') != b"")
+
+def _environment_variables() -> Dict[str, str]:
+    """
+    Wraps `os.environ` to filter out non-encodable values.
+    """
+    return {key: value
+            for key, value in os.environ.items()
+            if _is_encodable(value)}
+
+def unflatten(flat_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Given a "flattened" dict with compound keys, e.g.
+        {"a.b": 0}
+    unflatten it:
+        {"a": {"b": 0}}
+    """
+    unflat: Dict[str, Any] = {}
+
+    for compound_key, value in flat_dict.items():
+        curr_dict = unflat
+        parts = compound_key.split(".")
+        for key in parts[:-1]:
+            curr_value = curr_dict.get(key)
+            if key not in curr_dict:
+                curr_dict[key] = {}
+                curr_dict = curr_dict[key]
+            elif isinstance(curr_value, dict):
+                curr_dict = curr_value
+            else:
+                raise ConfigurationError("flattened dictionary is invalid")
+        if not isinstance(curr_dict, dict) or parts[-1] in curr_dict:
+            raise ConfigurationError("flattened dictionary is invalid")
+        else:
+            curr_dict[parts[-1]] = value
+
+    return unflat
+
+def with_fallback(preferred: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deep merge two dicts, preferring values from `preferred`.
+    """
+    def merge(preferred_value: Any, fallback_value: Any) -> Any:
+        if isinstance(preferred_value, dict) and isinstance(fallback_value, dict):
+            return with_fallback(preferred_value, fallback_value)
+        elif isinstance(preferred_value, dict) and isinstance(fallback_value, list):
+            # treat preferred_value as a sparse list, where each key is an index to be overridden
+            merged_list = fallback_value
+            for elem_key, preferred_element in preferred_value.items():
+                try:
+                    index = int(elem_key)
+                    merged_list[index] = merge(preferred_element, fallback_value[index])
+                except ValueError:
+                    raise ConfigurationError("could not merge dicts - the preferred dict contains "
+                                             f"invalid keys (key {elem_key} is not a valid list index)")
+                except IndexError:
+                    raise ConfigurationError("could not merge dicts - the preferred dict contains "
+                                             f"invalid keys (key {index} is out of bounds)")
+            return merged_list
+        else:
+            return copy.deepcopy(preferred_value)
+
+    preferred_keys = set(preferred.keys())
+    fallback_keys = set(fallback.keys())
+    common_keys = preferred_keys & fallback_keys
+
+    merged: Dict[str, Any] = {}
+
+    for key in preferred_keys - fallback_keys:
+        merged[key] = copy.deepcopy(preferred[key])
+    for key in fallback_keys - preferred_keys:
+        merged[key] = copy.deepcopy(fallback[key])
+
+    for key in common_keys:
+        preferred_value = preferred[key]
+        fallback_value = fallback[key]
+
+        merged[key] = merge(preferred_value, fallback_value)
+    return merged
+
+def parse_overrides(serialized_overrides: str) -> Dict[str, Any]:
+    if serialized_overrides:
+        ext_vars = _environment_variables()
+
+        return unflatten(json.loads(evaluate_snippet("", serialized_overrides, ext_vars=ext_vars)))
+    else:
+        return {}
 
 
 class Params(MutableMapping):
@@ -30,7 +182,7 @@ class Params(MutableMapping):
        representing discrete choices actually have acceptable values, and making sure no extra
        parameters are passed.
     #. We log all parameter reads, including default values.  This gives a more complete
-       specification of the actual parameters used than is given in a JSON / HOCON file, because
+       specification of the actual parameters used than is given in a JSON file, because
        those may not specify what default values were used, whereas this will log them.
 
     The convention for using a ``Params`` object in AllenNLP is that you will consume the parameters
@@ -41,7 +193,7 @@ class Params(MutableMapping):
     """
 
     # This allows us to check for the presence of "None" as a default argument,
-    # which we require because we make a distinction bewteen passing a value of "None"
+    # which we require because we make a distinction between passing a value of "None"
     # and passing no value to the default parameter of "pop".
     DEFAULT = object()
 
@@ -183,18 +335,25 @@ class Params(MutableMapping):
             raise ConfigurationError(message)
         return value
 
-    def as_dict(self, quiet=False):
+    def as_dict(self, quiet: bool = False, infer_type_and_cast: bool = False):
         """
         Sometimes we need to just represent the parameters as a dict, for instance when we pass
-        them to a Keras layer(so that they can be serialised).
+        them to PyTorch code.
 
         Parameters
         ----------
         quiet: bool, optional (default = False)
             Whether to log the parameters before returning them as a dict.
+        infer_type_and_cast : bool, optional (default = False)
+            If True, we infer types and cast (e.g. things that look like floats to floats).
         """
+        if infer_type_and_cast:
+            params_as_dict = infer_and_cast(self.params)
+        else:
+            params_as_dict = self.params
+
         if quiet:
-            return self.params
+            return params_as_dict
 
         def log_recursively(parameters, history):
             for key, value in parameters.items():
@@ -209,7 +368,7 @@ class Params(MutableMapping):
                     "used subsequently.")
         logger.info("CURRENTLY DEFINED PARAMETERS: ")
         log_recursively(self.params, self.history)
-        return self.params
+        return params_as_dict
 
     def as_flat_dict(self):
         """
@@ -233,7 +392,7 @@ class Params(MutableMapping):
         Uses ``copy.deepcopy()`` to create a duplicate (but fully distinct)
         copy of these Params.
         """
-        return Params(copy.deepcopy(self.params))
+        return copy.deepcopy(self)
 
     def assert_empty(self, class_name: str):
         """
@@ -271,22 +430,95 @@ class Params(MutableMapping):
                           loading_from_archive=self.loading_from_archive,
                           files_to_archive=self.files_to_archive)
         if isinstance(value, list):
-            value = [self._check_is_dict(new_history + '.list', v) for v in value]
+            value = [self._check_is_dict(f"{new_history}.{i}", v) for i, v in enumerate(value)]
         return value
 
     @staticmethod
-    def from_file(params_file: str, params_overrides: str = "") -> 'Params':
+    def from_file(params_file: str, params_overrides: str = "", ext_vars: dict = None) -> 'Params':
         """
         Load a `Params` object from a configuration file.
+
+        Parameters
+        ----------
+        params_file : ``str``
+            The path to the configuration file to load.
+        params_overrides : ``str``, optional
+            A dict of overrides that can be applied to final object.
+            e.g. {"model.embedding_dim": 10}
+        ext_vars : ``dict``, optional
+            Our config files are Jsonnet, which allows specifying external variables
+            for later substitution. Typically we substitute these using environment
+            variables; however, you can also specify them here, in which case they
+            take priority over environment variables.
+            e.g. {"HOME_DIR": "/Users/allennlp/home"}
         """
+        if ext_vars is None:
+            ext_vars = {}
+
         # redirect to cache, if necessary
         params_file = cached_path(params_file)
+        ext_vars = {**_environment_variables(), **ext_vars}
 
-        file_dict = pyhocon.ConfigFactory.parse_file(params_file)
+        file_dict = json.loads(evaluate_file(params_file, ext_vars=ext_vars))
 
-        overrides_dict = pyhocon.ConfigFactory.parse_string(params_overrides)
-        param_dict = overrides_dict.with_fallback(file_dict)
+        overrides_dict = parse_overrides(params_overrides)
+        param_dict = with_fallback(preferred=overrides_dict, fallback=file_dict)
+
         return Params(param_dict)
+
+    def to_file(self, params_file: str, preference_orders: List[List[str]] = None) -> None:
+        with open(params_file, "w") as handle:
+            json.dump(self.as_ordered_dict(preference_orders), handle, indent=4)
+
+    def as_ordered_dict(self, preference_orders: List[List[str]] = None) -> OrderedDict:
+        """
+        Returns Ordered Dict of Params from list of partial order preferences.
+
+        Parameters
+        ----------
+        preference_orders: List[List[str]], optional
+            ``preference_orders`` is list of partial preference orders. ["A", "B", "C"] means
+            "A" > "B" > "C". For multiple preference_orders first will be considered first.
+            Keys not found, will have last but alphabetical preference. Default Preferences:
+            ``[["dataset_reader", "iterator", "model", "train_data_path", "validation_data_path",
+            "test_data_path", "trainer", "vocabulary"], ["type"]]``
+        """
+        params_dict = self.as_dict(quiet=True)
+        if not preference_orders:
+            preference_orders = []
+            preference_orders.append(["dataset_reader", "iterator", "model",
+                                      "train_data_path", "validation_data_path", "test_data_path",
+                                      "trainer", "vocabulary"])
+            preference_orders.append(["type"])
+
+        def order_func(key):
+            # Makes a tuple to use for ordering.  The tuple is an index into each of the `preference_orders`,
+            # followed by the key itself.  This gives us integer sorting if you have a key in one of the
+            # `preference_orders`, followed by alphabetical ordering if not.
+            order_tuple = [order.index(key) if key in order else len(order) for order in preference_orders]
+            return order_tuple + [key]
+
+        def order_dict(dictionary, order_func):
+            # Recursively orders dictionary according to scoring order_func
+            result = OrderedDict()
+            for key, val in sorted(dictionary.items(), key=lambda item: order_func(item[0])):
+                result[key] = order_dict(val, order_func) if isinstance(val, dict) else val
+            return result
+
+        return order_dict(params_dict, order_func)
+
+    def get_hash(self) -> str:
+        """
+        Returns a hash code representing the current state of this ``Params`` object.  We don't
+        want to implement ``__hash__`` because that has deeper python implications (and this is a
+        mutable object), but this will give you a representation of the current state.
+        We use `zlib.adler32` instead of Python's builtin `hash` because the random seed for the
+        latter is reset on each new program invocation, as discussed here:
+        https://stackoverflow.com/questions/27954892/deterministic-hashing-in-python-3.
+        """
+        dumped = json.dumps(self.params, sort_keys=True)
+        hashed = zlib.adler32(dumped.encode())
+        return str(hashed)
 
 
 def pop_choice(params: Dict[str, Any],
@@ -308,10 +540,13 @@ def pop_choice(params: Dict[str, Any],
     return value
 
 
-def _replace_none(dictionary: Dict[str, Any]) -> Dict[str, Any]:
-    for key in dictionary.keys():
-        if dictionary[key] == "None":
-            dictionary[key] = None
-        elif isinstance(dictionary[key], pyhocon.config_tree.ConfigTree):
-            dictionary[key] = _replace_none(dictionary[key])
-    return dictionary
+def _replace_none(params: Any) -> Any:
+    if params == "None":
+        return None
+    elif isinstance(params, dict):
+        for key, value in params.items():
+            params[key] = _replace_none(value)
+        return params
+    elif isinstance(params, list):
+        return [_replace_none(value) for value in params]
+    return params

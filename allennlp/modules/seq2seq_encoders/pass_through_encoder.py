@@ -2,7 +2,6 @@ from overrides import overrides
 import torch
 
 from allennlp.modules.seq2seq_encoders.seq2seq_encoder import Seq2SeqEncoder
-from allennlp.common.params import Params
 
 @Seq2SeqEncoder.register("pass_through")
 class PassThroughEncoder(Seq2SeqEncoder):
@@ -30,13 +29,23 @@ class PassThroughEncoder(Seq2SeqEncoder):
     @overrides
     def forward(self,  # pylint: disable=arguments-differ
                 inputs: torch.Tensor,
-                mask: torch.LongTensor = None) -> torch.FloatTensor:
-        # pylint: disable=unused-argument
+                mask: torch.LongTensor = None) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        inputs : ``torch.Tensor``, required.
+            A tensor of shape (batch_size, timesteps, input_dim)
+        mask : ``torch.LongTensor``, optional (default = None).
+            A tensor of shape (batch_size, timesteps).
 
-        return inputs
-
-    @classmethod
-    def from_params(cls, params: Params) -> "PassThroughEncoder":
-        input_dim = params.pop_int("input_dim")
-        params.assert_empty(cls.__name__)
-        return PassThroughEncoder(input_dim=input_dim)
+        Returns
+        -------
+        A tensor of shape (batch_size, timesteps, output_dim),
+        where output_dim = input_dim.
+        """
+        if mask is None:
+            return inputs
+        else:
+            # We should mask out the output instead of the input.
+            # But here, output = input, so we directly mask out the input.
+            return inputs * mask.unsqueeze(dim=-1).float()

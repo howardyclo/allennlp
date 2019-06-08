@@ -1,8 +1,11 @@
 # pylint: disable=no-self-use,invalid-name
+from typing import Dict
+
 import pytest
 
-from allennlp.common.configuration import configure, Config, BASE_CONFIG
+from allennlp.common.configuration import configure, Config, BASE_CONFIG, json_annotation, choices
 from allennlp.common.testing import AllenNlpTestCase
+from allennlp.nn.activations import Activation
 
 
 class TestConfiguration(AllenNlpTestCase):
@@ -12,7 +15,7 @@ class TestConfiguration(AllenNlpTestCase):
         assert config == BASE_CONFIG
 
     def test_abstract_base_class(self):
-        config = configure('allennlp.data.dataset_readers.dataset_reader.DatasetReader')
+        config = choices('allennlp.data.dataset_readers.dataset_reader.DatasetReader')
 
         assert isinstance(config, list)
         assert 'allennlp.data.dataset_readers.snli.SnliReader' in config
@@ -23,7 +26,7 @@ class TestConfiguration(AllenNlpTestCase):
 
         items = {item.name: item for item in config.items}
 
-        assert len(items) == 3
+        assert len(items) == 4
 
         assert 'token_indexers' in items
         token_indexers = items['token_indexers']
@@ -31,6 +34,11 @@ class TestConfiguration(AllenNlpTestCase):
 
         assert 'domain_identifier' in items
         domain_identifier = items['domain_identifier']
+        assert domain_identifier.annotation == str
+        assert domain_identifier.default_value is None
+
+        assert 'bert_model_name' in items
+        domain_identifier = items['bert_model_name']
         assert domain_identifier.annotation == str
         assert domain_identifier.default_value is None
 
@@ -45,3 +53,25 @@ class TestConfiguration(AllenNlpTestCase):
 
         with pytest.raises(AttributeError):
             configure('allennlp.data.dataset_readers.NonExistentDatasetReader')
+
+    def test_vocab_workaround(self):
+        config = configure('allennlp.data.vocabulary.Vocabulary')
+        assert isinstance(config, Config)
+
+        items = {item.name: item for item in config.items}
+
+        assert len(items) == 9
+        assert "directory_path" in items
+        assert "max_vocab_size" in items
+
+    def test_activation_workaround(self):
+        annotation = Dict[str, Activation]
+        ja = json_annotation(annotation)
+
+        assert ja == {
+                "origin": "Dict",
+                "args": [
+                        {"origin": "str"},
+                        {"origin": "str"}
+                ]
+        }

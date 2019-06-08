@@ -21,14 +21,18 @@ The included module ``allennlp.run`` is such a script:
         configure   Generate a stub configuration
         evaluate    Evaluate the specified model + dataset
         predict     Use a trained model to make predictions.
-        serve       Run the web service and demo.
         make-vocab  Create a vocabulary
-        elmo        Use a trained model to make predictions.
+        elmo        Create word vectors using a pretrained ELMo model.
         fine-tune   Continue training a model on a new dataset
         dry-run     Create a vocabulary, compute dataset statistics and other
                     training utilities.
+        find-lr     Find a learning rate range where loss decreases quickly
+                    for the specified model and dataset.
         test-install
                     Run the unit tests.
+        print-results
+                    Print results from allennlp serialization directories to the
+                    console.
 
 However, it only knows about the models and classes that are
 included with AllenNLP. Once you start creating custom models,
@@ -41,12 +45,13 @@ calls ``main()``.
     allennlp.commands.evaluate
     allennlp.commands.make_vocab
     allennlp.commands.predict
-    allennlp.commands.serve
     allennlp.commands.train
     allennlp.commands.fine_tune
     allennlp.commands.elmo
     allennlp.commands.dry_run
+    allennlp.commands.find_learning_rate
     allennlp.commands.test_install
+    allennlp.commands.print_results
 
 .. automodule:: allennlp.commands
    :members:

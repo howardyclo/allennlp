@@ -7,19 +7,13 @@ allennlp.data.iterators
    :show-inheritance:
 
 * :ref:`DataIterator<data-iterator>`
-* :ref:`AdaptiveIterator<adaptive-iterator>`
 * :ref:`BasicIterator<basic-iterator>`
 * :ref:`BucketIterator<bucket-iterator>`
-* :ref:`EpochTrackingBucketIterator<epoch-tracking-bucket-iterator>`
+* :ref:`MultiprocessIterator<multiprocess-iterator>`
+* :ref:`HomogeneousBatchIterator<homogeneous-batch-iterator>`
 
 .. _data-iterator:
 .. automodule:: allennlp.data.iterators.data_iterator
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-.. _adaptive-iterator:
-.. automodule:: allennlp.data.iterators.adaptive_iterator
    :members:
    :undoc-members:
    :show-inheritance:
@@ -36,8 +30,15 @@ allennlp.data.iterators
    :undoc-members:
    :show-inheritance:
 
-.. _epoch-tracking-bucket-iterator:
-.. automodule:: allennlp.data.iterators.epoch_tracking_bucket_iterator
+.. _multiprocess-iterator:
+.. automodule:: allennlp.data.iterators.multiprocess_iterator
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. _homogeneous-batch-iterator:
+.. automodule:: allennlp.data.iterators.homogeneous_batch_iterator
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   

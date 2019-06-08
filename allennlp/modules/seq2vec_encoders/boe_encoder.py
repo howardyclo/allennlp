@@ -2,11 +2,11 @@ from overrides import overrides
 
 import torch
 
-from allennlp.common import Params
 from allennlp.modules.seq2vec_encoders.seq2vec_encoder import Seq2VecEncoder
 from allennlp.nn.util import get_lengths_from_binary_sequence_mask
 
 @Seq2VecEncoder.register("boe")
+@Seq2VecEncoder.register("bag_of_embeddings")
 class BagOfEmbeddingsEncoder(Seq2VecEncoder):
     """
     A ``BagOfEmbeddingsEncoder`` is a simple :class:`Seq2VecEncoder` which simply sums the embeddings
@@ -61,11 +61,3 @@ class BagOfEmbeddingsEncoder(Seq2VecEncoder):
                 summed = summed * (length_mask > 0).float().unsqueeze(-1)
 
         return summed
-
-    @classmethod
-    def from_params(cls, params: Params) -> 'BagOfEmbeddingsEncoder':
-        embedding_dim = params.pop_int('embedding_dim')
-        averaged = params.pop_bool('averaged', default=None)
-        params.assert_empty(cls.__name__)
-        return cls(embedding_dim=embedding_dim,
-                   averaged=averaged)

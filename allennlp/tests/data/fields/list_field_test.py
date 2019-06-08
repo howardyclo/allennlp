@@ -1,11 +1,39 @@
-# pylint: disable=no-self-use,invalid-name
+# pylint: disable=no-self-use,invalid-name,arguments-differ
+from typing import Dict
+
 import numpy
+import torch
 
 from allennlp.common.testing import AllenNlpTestCase
-from allennlp.data import Token, Vocabulary
+from allennlp.data import Token, Vocabulary, Instance
 from allennlp.data.fields import TextField, LabelField, ListField, IndexField, SequenceLabelField
+from allennlp.data.iterators import BasicIterator
 from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenCharactersIndexer
+from allennlp.data.tokenizers import WordTokenizer
+from allennlp.models import Model
+from allennlp.modules import Embedding
+from allennlp.modules.text_field_embedders import BasicTextFieldEmbedder
 
+
+class DummyModel(Model):
+    """
+    Performs a common operation (embedding) that won't work on an empty tensor.
+    Returns an arbitrary loss.
+    """
+    def __init__(self, vocab: Vocabulary) -> None:
+        super().__init__(vocab)
+        weight = torch.ones(vocab.get_vocab_size(), 10)
+        token_embedding = Embedding(
+                num_embeddings=vocab.get_vocab_size(),
+                embedding_dim=10,
+                weight=weight,
+                trainable=False)
+        self.embedder = BasicTextFieldEmbedder({"words": token_embedding})
+
+    def forward(self, # type: ignore
+                list_tensor: Dict[str, torch.LongTensor]) -> Dict[str, torch.Tensor]:
+        self.embedder(list_tensor)
+        return {"loss": 1.0}
 
 class TestListField(AllenNlpTestCase):
     def setUp(self):
@@ -24,7 +52,8 @@ class TestListField(AllenNlpTestCase):
 
         self.word_indexer = {"words": SingleIdTokenIndexer("words")}
         self.words_and_characters_indexers = {"words": SingleIdTokenIndexer("words"),
-                                              "characters": TokenCharactersIndexer("characters")}
+                                              "characters": TokenCharactersIndexer("characters",
+                                                                                   min_padding_length=1)}
         self.field1 = TextField([Token(t) for t in ["this", "is", "a", "sentence"]],
                                 self.word_indexer)
         self.field2 = TextField([Token(t) for t in ["this", "is", "a", "different", "sentence"]],
@@ -38,13 +67,24 @@ class TestListField(AllenNlpTestCase):
         self.sequence_label_field = SequenceLabelField([1, 1, 0, 1], self.field1)
         self.empty_sequence_label_field = self.sequence_label_field.empty_field()
 
+        tokenizer = WordTokenizer()
+        tokens = tokenizer.tokenize("Foo")
+        text_field = TextField(tokens, self.word_indexer)
+        empty_list_field = ListField([text_field.empty_field()])
+        empty_fields = {'list_tensor': empty_list_field}
+        self.empty_instance = Instance(empty_fields)
+
+        non_empty_list_field = ListField([text_field])
+        non_empty_fields = {'list_tensor': non_empty_list_field}
+        self.non_empty_instance = Instance(non_empty_fields)
+
         super(TestListField, self).setUp()
 
     def test_get_padding_lengths(self):
         list_field = ListField([self.field1, self.field2, self.field3])
         list_field.index(self.vocab)
         lengths = list_field.get_padding_lengths()
-        assert lengths == {"num_fields": 3, "list_num_tokens": 5}
+        assert lengths == {"num_fields": 3, "list_words_length": 5, "list_num_tokens": 5}
 
     def test_list_field_can_handle_empty_text_fields(self):
         list_field = ListField([self.field1, self.field2, self.empty_text_field])
@@ -99,7 +139,7 @@ class TestListField(AllenNlpTestCase):
         list_field = ListField([self.field1, self.field2, self.field3])
         list_field.index(self.vocab)
         padding_lengths = list_field.get_padding_lengths()
-        padding_lengths["list_num_tokens"] = 7
+        padding_lengths["list_words_length"] = 7
         padding_lengths["num_fields"] = 5
         tensor_dict = list_field.as_tensor(padding_lengths)
         numpy.testing.assert_array_almost_equal(tensor_dict["words"][0].detach().cpu().numpy(),
@@ -181,3 +221,46 @@ class TestListField(AllenNlpTestCase):
     def test_printing_doesnt_crash(self):
         list_field = ListField([self.field1, self.field2])
         print(list_field)
+
+    def test_sequence_methods(self):
+        list_field = ListField([self.field1, self.field2, self.field3])
+
+        assert len(list_field) == 3
+        assert list_field[1] == self.field2
+        assert [f for f in list_field] == [self.field1, self.field2, self.field3]
+
+    def test_empty_list_can_be_tensorized(self):
+        tokenizer = WordTokenizer()
+        tokens = tokenizer.tokenize("Foo")
+        text_field = TextField(tokens, self.word_indexer)
+        list_field = ListField([text_field.empty_field()])
+        fields = {'list': list_field, 'bar': TextField(tokenizer.tokenize("BAR"), self.word_indexer)}
+        instance = Instance(fields)
+        instance.index_fields(self.vocab)
+        instance.as_tensor_dict()
+
+    def test_batch_with_some_empty_lists_works(self):
+        dataset = [self.empty_instance, self.non_empty_instance]
+
+        model = DummyModel(self.vocab)
+        model.eval()
+        iterator = BasicIterator(batch_size=2)
+        iterator.index_with(self.vocab)
+        batch = next(iterator(dataset, shuffle=False))
+        model.forward(**batch)
+
+    # This use case may seem a bit peculiar. It's intended for situations where
+    # you have sparse inputs that are used as additional features for some
+    # prediction, and they are sparse enough that they can be empty for some
+    # cases. It would be silly to try to handle these as None in your model; it
+    # makes a whole lot more sense to just have a minimally-sized tensor that
+    # gets entirely masked and has no effect on the rest of the model.
+    def test_batch_of_entirely_empty_lists_works(self):
+        dataset = [self.empty_instance, self.empty_instance]
+
+        model = DummyModel(self.vocab)
+        model.eval()
+        iterator = BasicIterator(batch_size=2)
+        iterator.index_with(self.vocab)
+        batch = next(iterator(dataset, shuffle=False))
+        model.forward(**batch)

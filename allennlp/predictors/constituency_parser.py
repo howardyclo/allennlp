@@ -1,4 +1,4 @@
-from typing import Tuple, List
+from typing import List
 
 from overrides import overrides
 from nltk import Tree
@@ -62,9 +62,9 @@ class ConstituencyParserPredictor(Predictor):
     """
     Predictor for the :class:`~allennlp.models.SpanConstituencyParser` model.
     """
-    def __init__(self, model: Model, dataset_reader: DatasetReader) -> None:
+    def __init__(self, model: Model, dataset_reader: DatasetReader, language: str = 'en_core_web_sm') -> None:
         super().__init__(model, dataset_reader)
-        self._tokenizer = SpacyWordSplitter(language='en_core_web_sm', pos_tags=True)
+        self._tokenizer = SpacyWordSplitter(language=language, pos_tags=True)
 
     def predict(self, sentence: str) -> JsonDict:
         """
@@ -80,44 +80,39 @@ class ConstituencyParserPredictor(Predictor):
         return self.predict_json({"sentence" : sentence})
 
     @overrides
-    def _json_to_instance(self, json_dict: JsonDict) -> Tuple[Instance, JsonDict]:
+    def _json_to_instance(self, json_dict: JsonDict) -> Instance:
         """
         Expects JSON that looks like ``{"sentence": "..."}``.
         """
         spacy_tokens = self._tokenizer.split_words(json_dict["sentence"])
         sentence_text = [token.text for token in spacy_tokens]
         pos_tags = [token.tag_ for token in spacy_tokens]
-        return self._dataset_reader.text_to_instance(sentence_text, pos_tags), {}
+        return self._dataset_reader.text_to_instance(sentence_text, pos_tags)
 
     @overrides
-    def predict_json(self, inputs: JsonDict) -> JsonDict:
-        instance, return_dict = self._json_to_instance(inputs)
+    def predict_instance(self, instance: Instance) -> JsonDict:
         outputs = self._model.forward_on_instance(instance)
-        return_dict.update(outputs)
-
         # format the NLTK tree as a string on a single line.
-        tree = return_dict.pop("trees")
-        # return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
-        return_dict["trees"] = tree.pformat(margin=1000000)
+        tree = outputs.pop("trees")
+        outputs["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
+        outputs["trees"] = tree.pformat(margin=1000000)
         # Only keep "trees"
-        tree_str = return_dict["trees"]
-        # return sanitize(return_dict)
+        tree_str = outputs["trees"]
+        #return sanitize(outputs)
         return tree_str
 
     @overrides
-    def predict_batch_json(self, inputs: List[JsonDict]) -> List[JsonDict]:
-        instances, return_dicts = zip(*self._batch_json_to_instances(inputs))
+    def predict_batch_instance(self, instances: List[Instance]) -> List[JsonDict]:
         outputs = self._model.forward_on_instances(instances)
         tree_strs = []
-        for output, return_dict in zip(outputs, return_dicts):
-            return_dict.update(output)
+        for output in outputs:
             # format the NLTK tree as a string on a single line.
-            tree = return_dict.pop("trees")
-            # return_dict["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
-            return_dict["trees"] = tree.pformat(margin=1000000)
-            tree_str = return_dict["trees"]
+            tree = output.pop("trees")
+            output["hierplane_tree"] = self._build_hierplane_tree(tree, 0, is_root=True)
+            output["trees"] = tree.pformat(margin=1000000)
+            tree_str = output["trees"]
             tree_strs.append(tree_str)
-        # return sanitize(new_return_dicts)
+        #return sanitize(outputs)
         return tree_strs
 
     def _build_hierplane_tree(self, tree: Tree, index: int, is_root: bool) -> JsonDict:

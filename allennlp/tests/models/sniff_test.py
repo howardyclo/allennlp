@@ -1,23 +1,15 @@
 # pylint: disable=no-self-use,line-too-long
+import pytest
+import spacy
 
-from allennlp.commands.serve import DEFAULT_MODELS
 from allennlp.common.testing import AllenNlpTestCase
+from allennlp import pretrained
 
 
 class SniffTest(AllenNlpTestCase):
 
-    def test_config(self):
-        assert set(DEFAULT_MODELS.keys()) == {
-                'machine-comprehension',
-                'semantic-role-labeling',
-                'textual-entailment',
-                'coreference-resolution',
-                'named-entity-recognition',
-                'constituency-parsing'
-        }
-
     def test_machine_comprehension(self):
-        predictor = DEFAULT_MODELS['machine-comprehension'].predictor()
+        predictor = pretrained.bidirectional_attention_flow_seo_2017()
 
         passage = """The Matrix is a 1999 science fiction action film written and directed by The Wachowskis, starring Keanu Reeves, Laurence Fishburne, Carrie-Anne Moss, Hugo Weaving, and Joe Pantoliano. It depicts a dystopian future in which reality as perceived by most humans is actually a simulated reality called "the Matrix", created by sentient machines to subdue the human population, while their bodies' heat and electrical activity are used as an energy source. Computer programmer Neo" learns this truth and is drawn into a rebellion against the machines, which involves other people who have been freed from the "dream world". """  # pylint: disable=line-too-long
         question = "Who stars in The Matrix?"
@@ -29,7 +21,7 @@ class SniffTest(AllenNlpTestCase):
         assert correct == result["best_span_str"]
 
     def test_semantic_role_labeling(self):
-        predictor = DEFAULT_MODELS['semantic-role-labeling'].predictor()
+        predictor = pretrained.srl_with_elmo_luheng_2018()
 
         sentence = "If you liked the music we were playing last night, you will absolutely love what we're playing tomorrow!"
 
@@ -65,7 +57,7 @@ class SniffTest(AllenNlpTestCase):
         ]
 
     def test_textual_entailment(self):
-        predictor = DEFAULT_MODELS['textual-entailment'].predictor()
+        predictor = pretrained.decomposable_attention_with_elmo_parikh_2017()
 
         result = predictor.predict_json({
                 "premise": "An interplanetary spacecraft is in orbit around a gas giant's icy moon.",
@@ -89,7 +81,7 @@ class SniffTest(AllenNlpTestCase):
         assert result["label_probs"][2] > 0.6  # neutral
 
     def test_coreference_resolution(self):
-        predictor = DEFAULT_MODELS['coreference-resolution'].predictor()
+        predictor = pretrained.neural_coreference_resolution_lee_2017()
 
         document = "We 're not going to skimp on quality , but we are very focused to make next year . The only problem is that some of the fabrics are wearing out - since I was a newbie I skimped on some of the fabric and the poor quality ones are developing holes ."
 
@@ -105,7 +97,7 @@ class SniffTest(AllenNlpTestCase):
                                       'quality', 'ones', 'are', 'developing', 'holes', '.']
 
     def test_ner(self):
-        predictor = DEFAULT_MODELS['named-entity-recognition'].predictor()
+        predictor = pretrained.named_entity_recognition_with_elmo_peters_2018()
 
         sentence = """Michael Jordan is a professor at Berkeley."""
 
@@ -114,12 +106,27 @@ class SniffTest(AllenNlpTestCase):
         assert result["words"] == ["Michael", "Jordan", "is", "a", "professor", "at", "Berkeley", "."]
         assert result["tags"] == ["B-PER", "L-PER", "O", "O", "O", "O", "U-LOC", "O"]
 
+    @pytest.mark.skipif(spacy.__version__ < "2.1", reason="this model changed from 2.0 to 2.1")
     def test_constituency_parsing(self):
-        predictor = DEFAULT_MODELS['constituency-parsing'].predictor()
+        predictor = pretrained.span_based_constituency_parsing_with_elmo_joshi_2018()
 
         sentence = """Pierre Vinken died aged 81; immortalised aged 61."""
 
         result = predictor.predict_json({"sentence": sentence})
 
         assert result["tokens"] == ["Pierre", "Vinken", "died", "aged", "81", ";", "immortalised", "aged", "61", "."]
-        assert result["trees"] == "(S (NP (NNP Pierre) (NNP Vinken)) (VP (VP (VBD died) (NP (JJ aged) (CD 81))) (, ;) (VP (VBD immortalised) (S (ADJP (VBN aged) (NP (CD 61)))))) (. .))"
+        assert result["trees"] == "(S (S (NP (NNP Pierre) (NNP Vinken)) (VP (VBD died) (NP (JJ aged) (CD 81)))) (: ;) (S (VP (VBN immortalised) (S (ADJP (VBN aged) (NP (CD 61)))))) (. .))"
+
+    def test_dependency_parsing(self):
+        predictor = pretrained.biaffine_parser_stanford_dependencies_todzat_2017()
+        sentence = """He ate spaghetti with chopsticks."""
+        result = predictor.predict_json({"sentence": sentence})
+        # Note that this tree is incorrect. We are checking here that the decoded
+        # tree is _actually a tree_ - in greedy decoding versions of the dependency
+        # parser, this sentence has multiple heads. This test shouldn't really live here,
+        # but it's very difficult to re-create a concrete example of this behaviour without
+        # a trained dependency parser.
+        assert result['words'] == ['He', 'ate', 'spaghetti', 'with', 'chopsticks', '.']
+        assert result['pos'] == ['PRP', 'VBD', 'NNS', 'IN', 'NNS', '.']
+        assert result['predicted_dependencies'] == ['nsubj', 'root', 'dobj', 'prep', 'pobj', 'punct']
+        assert result['predicted_heads'] == [2, 0, 2, 2, 4, 2]

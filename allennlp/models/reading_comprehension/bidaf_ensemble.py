@@ -8,6 +8,7 @@ from allennlp.models.ensemble import Ensemble
 from allennlp.models.archival import load_archive
 from allennlp.models.model import Model
 from allennlp.models.reading_comprehension.bidaf import BidirectionalAttentionFlow
+from allennlp.models.reading_comprehension.util import get_best_span
 from allennlp.common import Params
 from allennlp.data import Vocabulary
 from allennlp.training.metrics import SquadEmAndF1
@@ -106,8 +107,10 @@ class BidafEnsemble(Ensemble):
                 'f1': f1_score,
         }
 
+    # The logic here requires a custom from_params.
     @classmethod
-    def from_params(cls, vocab: Vocabulary, params: Params):
+    def from_params(cls, vocab: Vocabulary, params: Params) -> 'BidafEnsemble':  # type: ignore
+        # pylint: disable=arguments-differ
         if vocab:
             raise ConfigurationError("vocab should be None")
 
@@ -124,10 +127,8 @@ def ensemble(subresults: List[Dict[str, torch.Tensor]]) -> torch.Tensor:
 
     Parameters
     ----------
-    index : int
-        The index within this index to ensemble
-
     subresults : List[Dict[str, torch.Tensor]]
+        Results of each submodel.
 
     Returns
     -------
@@ -138,4 +139,4 @@ def ensemble(subresults: List[Dict[str, torch.Tensor]]) -> torch.Tensor:
 
     span_start_probs = sum(subresult['span_start_probs'] for subresult in subresults) / len(subresults)
     span_end_probs = sum(subresult['span_end_probs'] for subresult in subresults) / len(subresults)
-    return BidirectionalAttentionFlow.get_best_span(span_start_probs.log(), span_end_probs.log()) # type: ignore
+    return get_best_span(span_start_probs.log(), span_end_probs.log()) # type: ignore

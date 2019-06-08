@@ -1,11 +1,11 @@
-from typing import Dict, List, TextIO, Optional
+from typing import Dict, List, TextIO, Optional, Any
+import warnings
 
 from overrides import overrides
 import torch
 from torch.nn.modules import Linear, Dropout
 import torch.nn.functional as F
 
-from allennlp.common import Params
 from allennlp.common.checks import check_dimensions_match
 from allennlp.data import Vocabulary
 from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder
@@ -21,7 +21,7 @@ from allennlp.training.metrics import SpanBasedF1Measure
 class SemanticRoleLabeler(Model):
     """
     This model performs semantic role labeling using BIO tags using Propbank semantic roles.
-    Specifically, it is an implmentation of `Deep Semantic Role Labeling - What works
+    Specifically, it is an implementation of `Deep Semantic Role Labeling - What works
     and what's next <https://homes.cs.washington.edu/~luheng/files/acl2017_hllz.pdf>`_ .
 
     This implementation is effectively a series of stacked interleaved LSTMs with highway
@@ -29,6 +29,9 @@ class SemanticRoleLabeler(Model):
     containing whether or not a word is the verbal predicate to generate predictions for in
     the sentence. Additionally, during inference, Viterbi decoding is applied to constrain
     the predictions to contain valid BIO sequences.
+
+    Specifically, the model expects and outputs IOB2-formatted tags, where the
+    B- tag is used in the beginning of every chunk (i.e. all chunks start with the B- tag).
 
     Parameters
     ----------
@@ -47,6 +50,8 @@ class SemanticRoleLabeler(Model):
         If provided, will be used to calculate the regularization penalty during training.
     label_smoothing : ``float``, optional (default = 0.0)
         Whether or not to use label smoothing on the labels when computing cross entropy loss.
+    ignore_span_metric: ``bool``, optional (default = False)
+        Whether to calculate span loss, which is irrelevant when predicting BIO for Open Information Extraction.
     """
     def __init__(self, vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
@@ -55,7 +60,8 @@ class SemanticRoleLabeler(Model):
                  embedding_dropout: float = 0.0,
                  initializer: InitializerApplicator = InitializerApplicator(),
                  regularizer: Optional[RegularizerApplicator] = None,
-                 label_smoothing: float = None) -> None:
+                 label_smoothing: float = None,
+                 ignore_span_metric: bool = False) -> None:
         super(SemanticRoleLabeler, self).__init__(vocab, regularizer)
 
         self.text_field_embedder = text_field_embedder
@@ -72,6 +78,7 @@ class SemanticRoleLabeler(Model):
                                                            self.num_classes))
         self.embedding_dropout = Dropout(p=embedding_dropout)
         self._label_smoothing = label_smoothing
+        self.ignore_span_metric = ignore_span_metric
 
         check_dimensions_match(text_field_embedder.get_output_dim() + binary_feature_dim,
                                encoder.get_input_dim(),
@@ -82,7 +89,8 @@ class SemanticRoleLabeler(Model):
     def forward(self,  # type: ignore
                 tokens: Dict[str, torch.LongTensor],
                 verb_indicator: torch.LongTensor,
-                tags: torch.LongTensor = None) -> Dict[str, torch.Tensor]:
+                tags: torch.LongTensor = None,
+                metadata: List[Dict[str, Any]] = None) -> Dict[str, torch.Tensor]:
         # pylint: disable=arguments-differ
         """
         Parameters
@@ -103,6 +111,9 @@ class SemanticRoleLabeler(Model):
         tags : torch.LongTensor, optional (default = None)
             A torch tensor representing the sequence of integer gold class labels
             of shape ``(batch_size, num_tokens)``
+        metadata : ``List[Dict[str, Any]]``, optional, (default = None)
+            metadata containg the original words in the sentence and the verb to compute the
+            frame for, under 'words' and 'verb' keys, respectively.
 
         Returns
         -------
@@ -138,13 +149,19 @@ class SemanticRoleLabeler(Model):
                                                       tags,
                                                       mask,
                                                       label_smoothing=self._label_smoothing)
-            self.span_metric(class_probabilities, tags, mask)
+            if not self.ignore_span_metric:
+                self.span_metric(class_probabilities, tags, mask)
             output_dict["loss"] = loss
 
         # We need to retain the mask in the output dictionary
         # so that we can crop the sequences to remove padding
         # when we do viterbi inference in self.decode.
         output_dict["mask"] = mask
+
+        words, verbs = zip(*[(x["words"], x["verb"]) for x in metadata])
+        if metadata is not None:
+            output_dict["words"] = list(words)
+            output_dict["verb"] = list(verbs)
         return output_dict
 
     @overrides
@@ -172,10 +189,17 @@ class SemanticRoleLabeler(Model):
         return output_dict
 
     def get_metrics(self, reset: bool = False):
-        metric_dict = self.span_metric.get_metric(reset=reset)
-        # This can be a lot of metrics, as there are 3 per class.
-        # we only really care about the overall metrics, so we filter for them here.
-        return {x: y for x, y in metric_dict.items() if "overall" in x}
+        if self.ignore_span_metric:
+            # Return an empty dictionary if ignoring the
+            # span metric
+            return {}
+
+        else:
+            metric_dict = self.span_metric.get_metric(reset=reset)
+
+            # This can be a lot of metrics, as there are 3 per class.
+            # we only really care about the overall metrics, so we filter for them here.
+            return {x: y for x, y in metric_dict.items() if "overall" in x}
 
     def get_viterbi_pairwise_potentials(self):
         """
@@ -202,24 +226,6 @@ class SemanticRoleLabeler(Model):
                     transition_matrix[i, j] = float("-inf")
         return transition_matrix
 
-    @classmethod
-    def from_params(cls, vocab: Vocabulary, params: Params) -> 'SemanticRoleLabeler':
-        embedder_params = params.pop("text_field_embedder")
-        text_field_embedder = TextFieldEmbedder.from_params(vocab, embedder_params)
-        encoder = Seq2SeqEncoder.from_params(params.pop("encoder"))
-        binary_feature_dim = params.pop_int("binary_feature_dim")
-        label_smoothing = params.pop_float("label_smoothing", None)
-
-        initializer = InitializerApplicator.from_params(params.pop('initializer', []))
-        regularizer = RegularizerApplicator.from_params(params.pop('regularizer', []))
-        params.assert_empty(cls.__name__)
-        return cls(vocab=vocab,
-                   text_field_embedder=text_field_embedder,
-                   encoder=encoder,
-                   binary_feature_dim=binary_feature_dim,
-                   initializer=initializer,
-                   regularizer=regularizer,
-                   label_smoothing=label_smoothing)
 
 def write_to_conll_eval_file(prediction_file: TextIO,
                              gold_file: TextIO,
@@ -228,8 +234,18 @@ def write_to_conll_eval_file(prediction_file: TextIO,
                              prediction: List[str],
                              gold_labels: List[str]):
     """
+    .. deprecated:: 0.8.4
+       The ``write_to_conll_eval_file`` function was deprecated in favor of the
+       identical ``write_bio_formatted_tags_to_file`` in version 0.8.4.
+
     Prints predicate argument predictions and gold labels for a single verbal
     predicate in a sentence to two provided file references.
+
+    The CoNLL SRL format is described in
+    `the shared task data README <http://www.lsi.upc.edu/~srlconll/conll05st-release/README>`_ .
+
+    This function expects IOB2-formatted tags, where the B- tag is used in the beginning
+    of every chunk (i.e. all chunks start with the B- tag).
 
     Parameters
     ----------
@@ -248,16 +264,100 @@ def write_to_conll_eval_file(prediction_file: TextIO,
     gold_labels : List[str], required.
         The gold BIO labels.
     """
+    warnings.warn("The 'write_to_conll_eval_file' function has been deprecated in favor of "
+                  "the identical 'write_bio_formatted_tags_to_file' function.",
+                  DeprecationWarning)
+    write_bio_formatted_tags_to_file(prediction_file,
+                                     gold_file,
+                                     verb_index,
+                                     sentence,
+                                     prediction,
+                                     gold_labels)
+
+
+def write_bio_formatted_tags_to_file(prediction_file: TextIO,
+                                     gold_file: TextIO,
+                                     verb_index: Optional[int],
+                                     sentence: List[str],
+                                     prediction: List[str],
+                                     gold_labels: List[str]):
+    """
+    Prints predicate argument predictions and gold labels for a single verbal
+    predicate in a sentence to two provided file references.
+
+    The CoNLL SRL format is described in
+    `the shared task data README <http://www.lsi.upc.edu/~srlconll/conll05st-release/README>`_ .
+
+    This function expects IOB2-formatted tags, where the B- tag is used in the beginning
+    of every chunk (i.e. all chunks start with the B- tag).
+
+    Parameters
+    ----------
+    prediction_file : TextIO, required.
+        A file reference to print predictions to.
+    gold_file : TextIO, required.
+        A file reference to print gold labels to.
+    verb_index : Optional[int], required.
+        The index of the verbal predicate in the sentence which
+        the gold labels are the arguments for, or None if the sentence
+        contains no verbal predicate.
+    sentence : List[str], required.
+        The word tokens.
+    prediction : List[str], required.
+        The predicted BIO labels.
+    gold_labels : List[str], required.
+        The gold BIO labels.
+    """
+    conll_formatted_predictions = convert_bio_tags_to_conll_format(prediction)
+    conll_formatted_gold_labels = convert_bio_tags_to_conll_format(gold_labels)
+    write_conll_formatted_tags_to_file(prediction_file,
+                                       gold_file,
+                                       verb_index,
+                                       sentence,
+                                       conll_formatted_predictions,
+                                       conll_formatted_gold_labels)
+
+
+def write_conll_formatted_tags_to_file(prediction_file: TextIO,
+                                       gold_file: TextIO,
+                                       verb_index: Optional[int],
+                                       sentence: List[str],
+                                       conll_formatted_predictions: List[str],
+                                       conll_formatted_gold_labels: List[str]):
+    """
+    Prints predicate argument predictions and gold labels for a single verbal
+    predicate in a sentence to two provided file references.
+
+    The CoNLL SRL format is described in
+    `the shared task data README <http://www.lsi.upc.edu/~srlconll/conll05st-release/README>`_ .
+
+    This function expects IOB2-formatted tags, where the B- tag is used in the beginning
+    of every chunk (i.e. all chunks start with the B- tag).
+
+    Parameters
+    ----------
+    prediction_file : TextIO, required.
+        A file reference to print predictions to.
+    gold_file : TextIO, required.
+        A file reference to print gold labels to.
+    verb_index : Optional[int], required.
+        The index of the verbal predicate in the sentence which
+        the gold labels are the arguments for, or None if the sentence
+        contains no verbal predicate.
+    sentence : List[str], required.
+        The word tokens.
+    conll_formatted_predictions : List[str], required.
+        The predicted CoNLL-formatted labels.
+    conll_formatted_gold_labels : List[str], required.
+        The gold CoNLL-formatted labels.
+    """
     verb_only_sentence = ["-"] * len(sentence)
     if verb_index:
         verb_only_sentence[verb_index] = sentence[verb_index]
 
-    conll_format_predictions = convert_bio_tags_to_conll_format(prediction)
-    conll_format_gold_labels = convert_bio_tags_to_conll_format(gold_labels)
-
     for word, predicted, gold in zip(verb_only_sentence,
-                                     conll_format_predictions,
-                                     conll_format_gold_labels):
+                                     conll_formatted_predictions,
+                                     conll_formatted_gold_labels):
         prediction_file.write(word.ljust(15))
         prediction_file.write(predicted.rjust(15) + "\n")
         gold_file.write(word.ljust(15))

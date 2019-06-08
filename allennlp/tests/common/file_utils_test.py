@@ -7,8 +7,11 @@ import json
 import pytest
 import responses
 
-from allennlp.common.file_utils import url_to_filename, filename_to_url, get_from_cache, cached_path
+from allennlp.common.file_utils import (
+        url_to_filename, filename_to_url, get_from_cache, cached_path, split_s3_path,
+        )
 from allennlp.common.testing import AllenNlpTestCase
+
 
 def set_up_glove(url: str, byt: bytes, change_etag_every: int = 1000):
     # Mock response for the datastore url that returns glove vectors
@@ -49,7 +52,7 @@ def set_up_glove(url: str, byt: bytes, change_etag_every: int = 1000):
 class TestFileUtils(AllenNlpTestCase):
     def setUp(self):
         super().setUp()
-        self.glove_file = self.FIXTURES_ROOT / 'glove.6B.100d.sample.txt.gz'
+        self.glove_file = self.FIXTURES_ROOT / 'embeddings/glove.6B.100d.sample.txt.gz'
         with open(self.glove_file, 'rb') as glove:
             self.glove_bytes = glove.read()
 
@@ -95,6 +98,17 @@ class TestFileUtils(AllenNlpTestCase):
             back_to_url, etag = filename_to_url(filename, cache_dir=self.TEST_DIR)
             assert back_to_url == url
             assert etag == "mytag"
+
+    def test_split_s3_path(self):
+        # Test splitting good urls.
+        assert split_s3_path("s3://my-bucket/subdir/file.txt") == ("my-bucket", "subdir/file.txt")
+        assert split_s3_path("s3://my-bucket/file.txt") == ("my-bucket", "file.txt")
+
+        # Test splitting bad urls.
+        with pytest.raises(ValueError):
+            split_s3_path("s3://")
+            split_s3_path("s3://myfile.txt")
+            split_s3_path("myfile.txt")
 
     @responses.activate
     def test_get_from_cache(self):

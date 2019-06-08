@@ -1,9 +1,9 @@
+import csv
 from typing import Dict
 import logging
 
 from overrides import overrides
 
-from allennlp.common import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.common.file_utils import cached_path
 from allennlp.common.util import START_SYMBOL, END_SYMBOL
@@ -46,6 +46,8 @@ class Seq2SeqDatasetReader(DatasetReader):
         ``source_token_indexers``.
     source_add_start_token : bool, (optional, default=True)
         Whether or not to add `START_SYMBOL` to the beginning of the source sequence.
+    delimiter : str, (optional, default="\t")
+        Set delimiter for tsv/csv file.
     """
     def __init__(self,
                  source_tokenizer: Tokenizer = None,
@@ -53,6 +55,7 @@ class Seq2SeqDatasetReader(DatasetReader):
                  source_token_indexers: Dict[str, TokenIndexer] = None,
                  target_token_indexers: Dict[str, TokenIndexer] = None,
                  source_add_start_token: bool = True,
+                 delimiter: str = "\t",
                  lazy: bool = False) -> None:
         super().__init__(lazy)
         self._source_tokenizer = source_tokenizer or WordTokenizer()
@@ -60,21 +63,16 @@ class Seq2SeqDatasetReader(DatasetReader):
         self._source_token_indexers = source_token_indexers or {"tokens": SingleIdTokenIndexer()}
         self._target_token_indexers = target_token_indexers or self._source_token_indexers
         self._source_add_start_token = source_add_start_token
+        self._delimiter = delimiter
 
     @overrides
     def _read(self, file_path):
         with open(cached_path(file_path), "r") as data_file:
             logger.info("Reading instances from lines in file at: %s", file_path)
-            for line_num, line in enumerate(data_file):
-                line = line.strip("\n")
-
-                if not line:
-                    continue
-
-                line_parts = line.split('\t')
-                if len(line_parts) != 2:
-                    raise ConfigurationError("Invalid line format: %s (line number %d)" % (line, line_num + 1))
-                source_sequence, target_sequence = line_parts
+            for line_num, row in enumerate(csv.reader(data_file, delimiter=self._delimiter)):
+                if len(row) != 2:
+                    raise ConfigurationError("Invalid line format: %s (line number %d)" % (row, line_num + 1))
+                source_sequence, target_sequence = row
                 yield self.text_to_instance(source_sequence, target_sequence)
 
     @overrides
@@ -93,29 +91,3 @@ class Seq2SeqDatasetReader(DatasetReader):
             return Instance({"source_tokens": source_field, "target_tokens": target_field})
         else:
             return Instance({'source_tokens': source_field})
-
-    @classmethod
-    def from_params(cls, params: Params) -> 'Seq2SeqDatasetReader':
-        source_tokenizer_type = params.pop('source_tokenizer', None)
-        source_tokenizer = None if source_tokenizer_type is None else Tokenizer.from_params(source_tokenizer_type)
-        target_tokenizer_type = params.pop('target_tokenizer', None)
-        target_tokenizer = None if target_tokenizer_type is None else Tokenizer.from_params(target_tokenizer_type)
-        source_indexers_type = params.pop('source_token_indexers', None)
-        source_add_start_token = params.pop_bool('source_add_start_token', True)
-        if source_indexers_type is None:
-            source_token_indexers = None
-        else:
-            source_token_indexers = TokenIndexer.dict_from_params(source_indexers_type)
-        target_indexers_type = params.pop('target_token_indexers', None)
-        if target_indexers_type is None:
-            target_token_indexers = None
-        else:
-            target_token_indexers = TokenIndexer.dict_from_params(target_indexers_type)
-        lazy = params.pop('lazy', False)
-        params.assert_empty(cls.__name__)
-        return Seq2SeqDatasetReader(source_tokenizer=source_tokenizer,
-                                    target_tokenizer=target_tokenizer,
-                                    source_token_indexers=source_token_indexers,
-                                    target_token_indexers=target_token_indexers,
-                                    source_add_start_token=source_add_start_token,
-                                    lazy=lazy)

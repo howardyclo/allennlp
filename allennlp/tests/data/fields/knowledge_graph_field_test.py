@@ -91,7 +91,7 @@ class KnowledgeGraphFieldTest(AllenNlpTestCase):
         self.field.index(self.vocab)
         assert self.field.get_padding_lengths() == {'num_entities': 9, 'num_entity_tokens': 3,
                                                     'num_utterance_tokens': 4}
-        self.field._token_indexers['token_characters'] = TokenCharactersIndexer()
+        self.field._token_indexers['token_characters'] = TokenCharactersIndexer(min_padding_length=1)
         self.field.index(self.vocab)
         assert self.field.get_padding_lengths() == {'num_entities': 9, 'num_entity_tokens': 3,
                                                     'num_utterance_tokens': 4,
@@ -191,7 +191,7 @@ class KnowledgeGraphFieldTest(AllenNlpTestCase):
         entity_text = field._entity_text_map[entity]
         feature_values = [field._span_overlap_fraction(entity, entity_text, token, i, utterance)
                           for i, token in enumerate(utterance)]
-        assert feature_values == [0, 0, 0, 1, 2/3, 1/3, 0, 0, 0]
+        assert feature_values == [0, 0, 0, 1, 1, 1, 0, 0, 0]
 
     def test_batch_tensors(self):
         self.field.index(self.vocab)

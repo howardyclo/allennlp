@@ -4,7 +4,6 @@ import logging
 from overrides import overrides
 from nltk.tree import Tree
 
-from allennlp.common import Params
 from allennlp.common.file_utils import cached_path
 from allennlp.data.dataset_readers.dataset_reader import DatasetReader
 from allennlp.data.fields import LabelField, TextField, Field
@@ -92,7 +91,7 @@ class StanfordSentimentTreeBankDatasetReader(DatasetReader):
         ----------
         tokens : ``List[str]``, required.
             The tokens in a given sentence.
-        sentiment ``str``, optional, (default = None).
+        sentiment : ``str``, optional, (default = None).
             The sentiment for this sentence.
 
         Returns
@@ -129,16 +128,3 @@ class StanfordSentimentTreeBankDatasetReader(DatasetReader):
                     sentiment = "1"
             fields['label'] = LabelField(sentiment)
         return Instance(fields)
-
-    @classmethod
-    def from_params(cls, params: Params) -> 'StanfordSentimentTreeBankDatasetReader':
-        token_indexers = TokenIndexer.dict_from_params(params.pop('token_indexers', {}))
-        use_subtrees = params.pop('use_subtrees', False)
-        granularity = params.pop_choice('granularity', ["5-class", "3-class", "2-class"], True)
-        lazy = params.pop('lazy', False)
-        params.assert_empty(cls.__name__)
-        return StanfordSentimentTreeBankDatasetReader(
-                token_indexers=token_indexers,
-                use_subtrees=use_subtrees,
-                granularity=granularity,
-                lazy=lazy)

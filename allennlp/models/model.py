@@ -5,7 +5,7 @@ an AllenNLP model.
 
 import logging
 import os
-from typing import Dict, Union, List
+from typing import Dict, Union, List, Set
 
 import numpy
 import torch
@@ -43,8 +43,11 @@ class Model(torch.nn.Module, Registrable):
 
     Finally, you can optionally implement :func:`Model.get_metrics` in order to make use
     of early stopping and best-model serialization based on a validation metric in
-    :class:`~allennlp.training.Trainer`.
+    :class:`~allennlp.training.Trainer`. Metrics that begin with "_" will not be logged
+    to the progress bar by :class:`~allennlp.training.Trainer`.
     """
+    _warn_for_unseparable_batches: Set[str] = set()
+
     def __init__(self,
                  vocab: Vocabulary,
                  regularizer: RegularizerApplicator = None) -> None:
@@ -136,25 +139,34 @@ class Model(torch.nn.Module, Registrable):
         ----------
         instances : List[Instance], required
             The instances to run the model on.
-        cuda_device : int, required
-            The GPU device to use.  -1 means use the CPU.
 
         Returns
         -------
         A list of the models output for each instance.
         """
+        batch_size = len(instances)
         with torch.no_grad():
             cuda_device = self._get_prediction_device()
             dataset = Batch(instances)
             dataset.index_instances(self.vocab)
-            model_input = dataset.as_tensor_dict(cuda_device=cuda_device)
+            model_input = util.move_to_device(dataset.as_tensor_dict(), cuda_device)
             outputs = self.decode(self(**model_input))
 
             instance_separated_output: List[Dict[str, numpy.ndarray]] = [{} for _ in dataset.instances]
             for name, output in list(outputs.items()):
                 if isinstance(output, torch.Tensor):
+                    # NOTE(markn): This is a hack because 0-dim pytorch tensors are not iterable.
+                    # This occurs with batch size 1, because we still want to include the loss in that case.
+                    if output.dim() == 0:
+                        output = output.unsqueeze(0)
+
+                    if output.size(0) != batch_size:
+                        self._maybe_warn_for_unseparable_batches(name)
+                        continue
                     output = output.detach().cpu().numpy()
-                outputs[name] = output
+                elif len(output) != batch_size:
+                    self._maybe_warn_for_unseparable_batches(name)
+                    continue
                 for instance_output, batch_element in zip(instance_separated_output, output):
                     instance_output[name] = batch_element
             return instance_separated_output
@@ -210,12 +222,19 @@ class Model(torch.nn.Module, Registrable):
         else:
             return -1
 
-
-    @classmethod
-    def from_params(cls, vocab: Vocabulary, params: Params) -> 'Model':
-        choice = params.pop_choice("type", cls.list_available())
-        model = cls.by_name(choice).from_params(vocab, params)
-        return model
+    def _maybe_warn_for_unseparable_batches(self, output_key: str):
+        """
+        This method warns once if a user implements a model which returns a dictionary with
+        values which we are unable to split back up into elements of the batch. This is controlled
+        by a class attribute ``_warn_for_unseperable_batches`` because it would be extremely verbose
+        otherwise.
+        """
+        if  output_key not in self._warn_for_unseparable_batches:
+            logger.warning(f"Encountered the {output_key} key in the model's return dictionary which "
+                           "couldn't be split by the batch size. Key will be ignored.")
+            # We only want to warn once for this key,
+            # so we set this to false so we don't warn again.
+            self._warn_for_unseparable_batches.add(output_key)
 
     @classmethod
     def _load(cls,
@@ -231,7 +250,10 @@ class Model(torch.nn.Module, Registrable):
 
         # Load vocabulary from file
         vocab_dir = os.path.join(serialization_dir, 'vocabulary')
-        vocab = Vocabulary.from_files(vocab_dir)
+        # If the config specifies a vocabulary subclass, we need to use it.
+        vocab_params = config.get("vocabulary", Params({}))
+        vocab_choice = vocab_params.pop_choice("type", Vocabulary.list_available(), True)
+        vocab = Vocabulary.by_name(vocab_choice).from_files(vocab_dir)
 
         model_params = config.get('model')
 
@@ -240,7 +262,16 @@ class Model(torch.nn.Module, Registrable):
         # stored in our weights.  We don't need any pretrained weight file anymore, and we don't
         # want the code to look for it, so we remove it from the parameters here.
         remove_pretrained_embedding_params(model_params)
-        model = Model.from_params(vocab, model_params)
+        model = Model.from_params(vocab=vocab, params=model_params)
+
+        # If vocab+embedding extension was done, the model initialized from from_params
+        # and one defined by state dict in weights_file might not have same embedding shapes.
+        # Eg. when model embedder module was transferred along with vocab extension, the
+        # initialized embedding weight shape would be smaller than one in the state_dict.
+        # So calling model embedding extension is required before load_state_dict.
+        # If vocab and model embeddings are in sync, following would be just a no-op.
+        model.extend_embedder_vocab()
+
         model_state = torch.load(weights_file, map_location=util.device_mapping(cuda_device))
         model.load_state_dict(model_state)
 
@@ -295,6 +326,32 @@ class Model(torch.nn.Module, Registrable):
         # pylint: disable=protected-access
         return cls.by_name(model_type)._load(config, serialization_dir, weights_file, cuda_device)
 
+    def extend_embedder_vocab(self, embedding_sources_mapping: Dict[str, str] = None) -> None:
+        """
+        Iterates through all embedding modules in the model and assures it can embed
+        with the extended vocab. This is required in fine-tuning or transfer learning
+        scenarios where model was trained with original vocabulary but during
+        fine-tuning/transfer-learning, it will have it work with extended vocabulary
+        (original + new-data vocabulary).
+
+        Parameters
+        ----------
+        embedding_sources_mapping : Dict[str, str], (optional, default=None)
+            Mapping from model_path to pretrained-file path of the embedding
+            modules. If pretrained-file used at time of embedding initialization
+            isn't available now, user should pass this mapping. Model path is
+            path traversing the model attributes upto this embedding module.
+            Eg. "_text_field_embedder.token_embedder_tokens".
+        """
+        # self.named_modules() gives all sub-modules (including nested children)
+        # The path nesting is already separated by ".": eg. parent_module_name.child_module_name
+        embedding_sources_mapping = embedding_sources_mapping or {}
+        for model_path, module in self.named_modules():
+            if hasattr(module, 'extend_vocab'):
+                pretrained_file = embedding_sources_mapping.get(model_path, None)
+                module.extend_vocab(self.vocab,
+                                    extension_pretrained_file=pretrained_file,
+                                    model_path=model_path)
 
 def remove_pretrained_embedding_params(params: Params):
     keys = params.keys()

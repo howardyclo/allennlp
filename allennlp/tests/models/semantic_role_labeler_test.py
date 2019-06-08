@@ -11,7 +11,7 @@ from allennlp.common.params import Params
 from allennlp.common.checks import ConfigurationError
 from allennlp.models.semantic_role_labeler import convert_bio_tags_to_conll_format
 from allennlp.models import Model
-from allennlp.models.semantic_role_labeler import write_to_conll_eval_file
+from allennlp.models.semantic_role_labeler import write_bio_formatted_tags_to_file
 from allennlp.nn.util import get_lengths_from_binary_sequence_mask
 
 
@@ -33,7 +33,8 @@ class SemanticRoleLabelerTest(ModelTestCase):
         output_dict = self.model(**training_tensors)
         class_probs = output_dict['class_probabilities'][0].data.numpy()
         numpy.testing.assert_almost_equal(numpy.sum(class_probs, -1),
-                                          numpy.ones(class_probs.shape[0]))
+                                          numpy.ones(class_probs.shape[0]),
+                                          decimal=6)
 
     def test_decode_runs_correctly(self):
         training_tensors = self.dataset.as_tensor_dict()
@@ -45,7 +46,6 @@ class SemanticRoleLabelerTest(ModelTestCase):
         # of the individual instances, rather than the max length.
         for prediction, length in zip(decode_output_dict["tags"], lengths):
             assert len(prediction) == length
-
 
     def test_bio_tags_correctly_convert_to_conll_format(self):
         bio_tags = ["B-ARG-1", "I-ARG-1", "O", "B-V", "B-ARGM-ADJ", "O"]
@@ -62,24 +62,17 @@ class SemanticRoleLabelerTest(ModelTestCase):
             # Use the same bio tags as prediction vs gold to make it obvious by looking
             # at the perl script output if something is wrong. Write them twice to
             # ensure that the perl script deals with multiple sentences.
-            write_to_conll_eval_file(gold_file, prediction_file, 4, sentence, bio_tags, bio_tags)
-            write_to_conll_eval_file(gold_file, prediction_file, 4, sentence, bio_tags, bio_tags)
+            write_bio_formatted_tags_to_file(gold_file, prediction_file, 4, sentence, bio_tags, bio_tags)
+            write_bio_formatted_tags_to_file(gold_file, prediction_file, 4, sentence, bio_tags, bio_tags)
 
         perl_script_command = ["perl", str(self.TOOLS_ROOT / "srl-eval.pl"), prediction_file_path, gold_file_path]
         exit_code = subprocess.check_call(perl_script_command)
         assert exit_code == 0
 
     def test_mismatching_dimensions_throws_configuration_error(self):
-        initial_working_dir = os.getcwd()
-        # Change directory to module root.
-        os.chdir(self.MODULE_ROOT)
-
         params = Params.from_file(self.param_file)
         # Make the phrase layer wrong - it should be 150 to match
         # the embedding + binary feature dimensions.
         params["model"]["encoder"]["input_size"] = 10
         with pytest.raises(ConfigurationError):
-            Model.from_params(self.vocab, params.pop("model"))
-
-        # Change directory back to what it was initially
-        os.chdir(initial_working_dir)
+            Model.from_params(vocab=self.vocab, params=params.pop("model"))

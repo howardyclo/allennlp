@@ -27,7 +27,7 @@ class BiattentiveClassificationNetwork(Model):
     At a high level, the model starts by embedding the tokens and running them through
     a feed-forward neural net (``pre_encode_feedforward``). Then, we encode these
     representations with a ``Seq2SeqEncoder`` (``encoder``). We run biattention
-    on the encoder output represenatations (self-attention in this case, since
+    on the encoder output representations (self-attention in this case, since
     the two representations that typically go into biattention are identical) and
     get out an attentive vector representation of the text. We combine this text
     representation with the encoder outputs computed earlier, and then run this through
@@ -204,7 +204,11 @@ class BiattentiveClassificationNetwork(Model):
         text_mask = util.get_text_field_mask(tokens).float()
         # Pop elmo tokens, since elmo embedder should not be present.
         elmo_tokens = tokens.pop("elmo", None)
-        embedded_text = self._text_field_embedder(tokens)
+        if tokens:
+            embedded_text = self._text_field_embedder(tokens)
+        else:
+            # only using "elmo" for input
+            embedded_text = None
 
         # Add the "elmo" key back to "tokens" if not None, since the tests and the
         # subsequent training epochs rely not being modified during forward()
@@ -226,7 +230,10 @@ class BiattentiveClassificationNetwork(Model):
                         "Model was built to use Elmo, but input text is not tokenized for Elmo.")
 
         if self._use_input_elmo:
-            embedded_text = torch.cat([embedded_text, input_elmo], dim=-1)
+            if embedded_text is not None:
+                embedded_text = torch.cat([embedded_text, input_elmo], dim=-1)
+            else:
+                embedded_text = input_elmo
 
         dropped_embedded_text = self._embedding_dropout(embedded_text)
         pre_encoded_text = self._pre_encode_feedforward(dropped_embedded_text)
@@ -234,7 +241,7 @@ class BiattentiveClassificationNetwork(Model):
 
         # Compute biattention. This is a special case since the inputs are the same.
         attention_logits = encoded_tokens.bmm(encoded_tokens.permute(0, 2, 1).contiguous())
-        attention_weights = util.last_dim_softmax(attention_logits, text_mask)
+        attention_weights = util.masked_softmax(attention_logits, text_mask)
         encoded_text = util.weighted_sum(encoded_tokens, attention_weights)
 
         # Build the input to the integrator
@@ -297,10 +304,12 @@ class BiattentiveClassificationNetwork(Model):
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         return {metric_name: metric.get_metric(reset) for metric_name, metric in self.metrics.items()}
 
+    # The FeedForward vs Maxout logic here requires a custom from_params.
     @classmethod
-    def from_params(cls, vocab: Vocabulary, params: Params) -> 'BiattentiveClassificationNetwork':
+    def from_params(cls, vocab: Vocabulary, params: Params) -> 'BiattentiveClassificationNetwork':  # type: ignore
+        # pylint: disable=arguments-differ
         embedder_params = params.pop("text_field_embedder")
-        text_field_embedder = TextFieldEmbedder.from_params(vocab, embedder_params)
+        text_field_embedder = TextFieldEmbedder.from_params(vocab=vocab, params=embedder_params)
         embedding_dropout = params.pop("embedding_dropout")
         pre_encode_feedforward = FeedForward.from_params(params.pop("pre_encode_feedforward"))
         encoder = Seq2SeqEncoder.from_params(params.pop("encoder"))

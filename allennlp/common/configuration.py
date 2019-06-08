@@ -4,20 +4,25 @@ Tools for programmatically generating config files for AllenNLP models.
 # pylint: disable=protected-access,too-many-return-statements
 
 from typing import NamedTuple, Optional, Any, List, TypeVar, Generic, Type, Dict, Union, Sequence, Tuple
+import collections
 import inspect
 import importlib
+import json
 import re
 
 import torch
+from numpydoc.docscrape import NumpyDocString
 
 from allennlp.common import Registrable, JsonDict
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.iterators import DataIterator
-from allennlp.data.vocabulary import Vocabulary
+from allennlp.data.vocabulary import Vocabulary, DEFAULT_NON_PADDED_NAMESPACES
 from allennlp.models.model import Model
 from allennlp.modules.seq2seq_encoders import _Seq2SeqWrapper
 from allennlp.modules.seq2vec_encoders import _Seq2VecWrapper
-from allennlp.nn.initializers import Initializer
+from allennlp.modules.token_embedders import Embedding
+from allennlp.nn.activations import Activation
+from allennlp.nn.initializers import Initializer, PretrainedModelInitializer
 from allennlp.nn.regularizers import Regularizer
 from allennlp.training.optimizers import Optimizer as AllenNLPOptimizer
 from allennlp.training.trainer import Trainer
@@ -34,7 +39,7 @@ def full_name(cla55: Optional[type]) -> str:
     if cla55 is None:
         return "?"
 
-    if issubclass(cla55, Initializer) and cla55 != Initializer:
+    if issubclass(cla55, Initializer) and cla55 not in [Initializer, PretrainedModelInitializer]:
         init_fn = cla55()._init_function
         return f"{init_fn.__module__}.{init_fn.__name__}"
 
@@ -42,10 +47,10 @@ def full_name(cla55: Optional[type]) -> str:
     args = getattr(cla55, '__args__', ())
 
     # Special handling for compound types
-    if origin == Dict:
+    if origin in (Dict, dict):
         key_type, value_type = args
         return f"""Dict[{full_name(key_type)}, {full_name(value_type)}]"""
-    elif origin in (Tuple, List, Sequence):
+    elif origin in (Tuple, tuple, List, list, Sequence, collections.abc.Sequence):
         return f"""{_remove_prefix(str(origin))}[{", ".join(full_name(arg) for arg in args)}]"""
     elif origin == Union:
         # Special special case to handle optional types:
@@ -55,6 +60,41 @@ def full_name(cla55: Optional[type]) -> str:
             return f"""Union[{", ".join(full_name(arg) for arg in args)}]"""
     else:
         return _remove_prefix(f"{cla55.__module__}.{cla55.__name__}")
+
+
+def json_annotation(cla55: Optional[type]):
+    # Special case to handle None:
+    if cla55 is None:
+        return {'origin': '?'}
+
+    # Special case to handle activation functions, which can't be specified as JSON
+    if cla55 == Activation:
+        return {'origin': 'str'}
+
+    # Hack because e.g. typing.Union isn't a type.
+    if isinstance(cla55, type) and issubclass(cla55, Initializer) and cla55 != Initializer:
+        init_fn = cla55()._init_function
+        return {'origin': f"{init_fn.__module__}.{init_fn.__name__}"}
+
+    origin = getattr(cla55, '__origin__', None)
+    args = getattr(cla55, '__args__', ())
+
+    # Special handling for compound types
+    if origin in (Dict, dict):
+        key_type, value_type = args
+        return {'origin': "Dict", 'args': [json_annotation(key_type), json_annotation(value_type)]}
+    elif origin in (Tuple, tuple, List, list, Sequence, collections.abc.Sequence):
+        return {'origin': _remove_prefix(str(origin)), 'args': [json_annotation(arg) for arg in args]}
+    elif origin == Union:
+        # Special special case to handle optional types:
+        if len(args) == 2 and args[-1] == type(None):
+            return json_annotation(args[0])
+        else:
+            return {'origin': "Union", 'args': [json_annotation(arg) for arg in args]}
+    elif cla55 == Ellipsis:
+        return {'origin': "..."}
+    else:
+        return {'origin': _remove_prefix(f"{cla55.__module__}.{cla55.__name__}")}
 
 
 class ConfigItem(NamedTuple):
@@ -67,11 +107,31 @@ class ConfigItem(NamedTuple):
     comment: str = ''
 
     def to_json(self) -> JsonDict:
-        return {
-                "annotation": full_name(self.annotation),
-                "default_value": str(self.default_value),
-                "comment": self.comment
+        json_dict = {
+                "name": self.name,
+                "annotation": json_annotation(self.annotation),
         }
+
+        if is_configurable(self.annotation):
+            json_dict["configurable"] = True
+
+        if is_registrable(self.annotation):
+            json_dict["registrable"] = True
+
+        if self.default_value != _NO_DEFAULT:
+            try:
+                # Ugly check that default value is actually serializable
+                json.dumps(self.default_value)
+                json_dict["defaultValue"] = self.default_value
+            except TypeError:
+                print(f"unable to json serialize {self.default_value}, using None instead")
+                json_dict["defaultValue"] = None
+
+
+        if self.comment:
+            json_dict["comment"] = self.comment
+
+        return json_dict
 
 
 T = TypeVar("T")
@@ -92,15 +152,12 @@ class Config(Generic[T]):
         return f"Config({self.items})"
 
     def to_json(self) -> JsonDict:
-        item_dict: JsonDict = {
-                item.name: item.to_json()
-                for item in self.items
-        }
+        blob: JsonDict = {'items': [item.to_json() for item in self.items]}
 
         if self.typ3:
-            item_dict["type"] = self.typ3
+            blob["type"] = self.typ3
 
-        return item_dict
+        return blob
 
 
 # ``None`` is sometimes the default value for a function parameter,
@@ -135,6 +192,33 @@ def _get_config_type(cla55: type) -> Optional[str]:
 
     return None
 
+def _docspec_comments(obj) -> Dict[str, str]:
+    """
+    Inspect the docstring and get the comments for each parameter.
+    """
+    # Sometimes our docstring is on the class, and sometimes it's on the initializer,
+    # so we've got to check both.
+    class_docstring = getattr(obj, '__doc__', None)
+    init_docstring = getattr(obj.__init__, '__doc__', None) if hasattr(obj, '__init__') else None
+
+    docstring = class_docstring or init_docstring or ''
+
+    doc = NumpyDocString(docstring)
+    params = doc["Parameters"]
+    comments: Dict[str, str] = {}
+
+    for line in params:
+        # It looks like when there's not a space after the parameter name,
+        # numpydocstring parses it incorrectly.
+        name_bad = line[0]
+        name = name_bad.split(":")[0]
+
+        # Sometimes the line has 3 fields, sometimes it has 4 fields.
+        comment = "\n".join(line[-1])
+
+        comments[name] = comment
+
+    return comments
 
 def _auto_config(cla55: Type[T]) -> Config[T]:
     """
@@ -143,8 +227,8 @@ def _auto_config(cla55: Type[T]) -> Config[T]:
     """
     typ3 = _get_config_type(cla55)
 
-    # Don't include self
-    names_to_ignore = {"self"}
+    # Don't include self, or vocab
+    names_to_ignore = {"self", "vocab"}
 
     # Hack for RNNs
     if cla55 in [torch.nn.RNN, torch.nn.LSTM, torch.nn.GRU]:
@@ -160,6 +244,7 @@ def _auto_config(cla55: Type[T]) -> Config[T]:
         names_to_ignore.add("tensor")
 
     argspec = inspect.getfullargspec(function_to_inspect)
+    comments = _docspec_comments(cla55)
 
     items: List[ConfigItem] = []
 
@@ -175,9 +260,14 @@ def _auto_config(cla55: Type[T]) -> Config[T]:
         if name in names_to_ignore:
             continue
         annotation = argspec.annotations.get(name)
+        comment = comments.get(name)
 
         # Don't include Model, the only place you'd specify that is top-level.
         if annotation == Model:
+            continue
+
+        # Don't include DataIterator, the only place you'd specify that is top-level.
+        if annotation == DataIterator:
             continue
 
         # Don't include params for an Optimizer
@@ -192,7 +282,15 @@ def _auto_config(cla55: Type[T]) -> Config[T]:
         if cla55 == Trainer and annotation == torch.optim.Optimizer:
             annotation = AllenNLPOptimizer
 
-        items.append(ConfigItem(name, annotation, default))
+        # Hack in embedding num_embeddings as optional (it can be inferred from the pretrained file)
+        if cla55 == Embedding and name == "num_embeddings":
+            default = None
+
+        items.append(ConfigItem(name, annotation, default, comment))
+
+    # More hacks, Embedding
+    if cla55 == Embedding:
+        items.insert(1, ConfigItem("pretrained_file", str, None))
 
     return Config(items, typ3=typ3)
 
@@ -216,10 +314,43 @@ def render_config(config: Config, indent: str = "") -> str:
             "}\n"
     ])
 
-def is_configurable(obj) -> bool:
+
+def _remove_optional(typ3: type) -> type:
+    origin = getattr(typ3, '__origin__', None)
+    args = getattr(typ3, '__args__', None)
+
+    if origin == Union and len(args) == 2 and args[-1] == type(None):
+        return _remove_optional(args[0])
+    else:
+        return typ3
+
+def is_registrable(typ3: type) -> bool:
+    # Throw out optional:
+    typ3 = _remove_optional(typ3)
+
     # Anything with a from_params method is itself configurable.
     # So are regularizers even though they don't.
-    return hasattr(obj, 'from_params') or obj == Regularizer
+    if typ3 == Regularizer:
+        return True
+
+    # Some annotations are unions and will crash `issubclass`.
+    # TODO: figure out a better way to deal with them
+    try:
+        return issubclass(typ3, Registrable)
+    except TypeError:
+        return False
+
+
+def is_configurable(typ3: type) -> bool:
+    # Throw out optional:
+    typ3 = _remove_optional(typ3)
+
+    # Anything with a from_params method is itself configurable.
+    # So are regularizers even though they don't.
+    return any([
+            hasattr(typ3, 'from_params'),
+            typ3 == Regularizer,
+    ])
 
 def _render(item: ConfigItem, indent: str = "") -> str:
     """
@@ -269,7 +400,7 @@ BASE_CONFIG: Config = Config([
         ConfigItem(name="evaluate_on_test",
                    annotation=bool,
                    default_value=False,
-                   comment="whether to evaluate on the test dataset at the end of training (don't do it!"),
+                   comment="whether to evaluate on the test dataset at the end of training (don't do it!)"),
         ConfigItem(name="model",
                    annotation=Model,
                    default_value=_NO_DEFAULT,
@@ -298,7 +429,7 @@ def _valid_choices(cla55: type) -> Dict[str, str]:
     Return a mapping {registered_name -> subclass_name}
     for the registered subclasses of `cla55`.
     """
-    choices: Dict[str, str] = {}
+    valid_choices: Dict[str, str] = {}
 
     if cla55 not in Registrable._registry:
         raise ValueError(f"{cla55} is not a known Registrable class")
@@ -308,11 +439,20 @@ def _valid_choices(cla55: type) -> Dict[str, str]:
         if isinstance(subclass, (_Seq2SeqWrapper, _Seq2VecWrapper)):
             subclass = subclass._module_class
 
-        choices[name] = full_name(subclass)
+        valid_choices[name] = full_name(subclass)
 
-    return choices
+    return valid_choices
 
-def configure(full_path: str = '') -> Union[Config, List[str]]:
+def choices(full_path: str = '') -> List[str]:
+    parts = full_path.split(".")
+    class_name = parts[-1]
+    module_name = ".".join(parts[:-1])
+    module = importlib.import_module(module_name)
+    cla55 = getattr(module, class_name)
+    return list(_valid_choices(cla55).values())
+
+
+def configure(full_path: str = '') -> Config:
     if not full_path:
         return BASE_CONFIG
 
@@ -321,8 +461,51 @@ def configure(full_path: str = '') -> Union[Config, List[str]]:
     module_name = ".".join(parts[:-1])
     module = importlib.import_module(module_name)
     cla55 = getattr(module, class_name)
-
-    if Registrable in getattr(cla55, '__bases__', ()):
-        return list(_valid_choices(cla55).values())
+    if cla55 == Vocabulary:
+        return VOCAB_CONFIG
     else:
         return _auto_config(cla55)
+
+
+# ONE OFF LOGIC FOR VOCABULARY
+VOCAB_CONFIG: Config = Config([
+        ConfigItem(name="directory_path",
+                   annotation=str,
+                   default_value=None,
+                   comment="path to an existing vocabulary (if you want to use one)"),
+        ConfigItem(name="extend",
+                   annotation=bool,
+                   default_value=False,
+                   comment="whether to extend the existing vocabulary (if you specified one)"),
+        ConfigItem(name="min_count",
+                   annotation=int,
+                   default_value=None,
+                   comment="only include tokens that occur at least this many times"),
+        ConfigItem(name="max_vocab_size",
+                   annotation=Union[int, Dict[str, int]],
+                   default_value=None,
+                   comment="used to cap the number of tokens in your vocabulary"),
+        ConfigItem(name="non_padded_namespaces",
+                   annotation=List[str],
+                   default_value=DEFAULT_NON_PADDED_NAMESPACES,
+                   comment="namespaces that don't get padding or OOV tokens"),
+        ConfigItem(name="pretrained_files",
+                   annotation=Dict[str, str],
+                   default_value=None,
+                   comment="pretrained embedding files for each namespace"),
+        ConfigItem(name="min_pretrained_embeddings",
+                   annotation=Dict[str, int],
+                   default_value=None,
+                   comment="specifies a number of lines to keep for each namespace, "
+                   "even for words not appearing in the data"),
+        ConfigItem(name="only_include_pretrained_words",
+                   annotation=bool,
+                   default_value=False,
+                   comment=("if True, keeps only the words that appear in the pretrained set. "
+                            "if False, also includes non-pretrained words that exceed min_count.")),
+        ConfigItem(name="tokens_to_add",
+                   annotation=Dict[str, List[str]],
+                   default_value=None,
+                   comment=("any tokens here will certainly be included in the keyed namespace, "
+                            "regardless of your data"))
+])

@@ -41,7 +41,7 @@ class TestMain(AllenNlpTestCase):
 
         fake_evaluate = FakeEvaluate()
 
-        sys.argv = ["allennlp.run", "evaluate"]
+        sys.argv = ["allennlp", "evaluate"]
         main(subcommand_overrides={"evaluate": fake_evaluate})
 
         assert fake_evaluate.add_subparser_called
@@ -70,13 +70,15 @@ class TestMain(AllenNlpTestCase):
 
         # Write out config file
         config_path = self.TEST_DIR / 'config.json'
-        config_json = """
+        config_json = """{
                 "model": {
                         "type": "duplicate-test-tagger",
                         "text_field_embedder": {
-                                "tokens": {
-                                        "type": "embedding",
-                                        "embedding_dim": 5
+                                "token_embedders": {
+                                        "tokens": {
+                                                "type": "embedding",
+                                                "embedding_dim": 5
+                                        }
                                 }
                         },
                         "encoder": {
@@ -87,21 +89,21 @@ class TestMain(AllenNlpTestCase):
                         }
                 },
                 "dataset_reader": {"type": "sequence_tagging"},
-                "train_data_path": $$$,
-                "validation_data_path": $$$,
+                "train_data_path": "$$$",
+                "validation_data_path": "$$$",
                 "iterator": {"type": "basic", "batch_size": 2},
                 "trainer": {
                         "num_epochs": 2,
                         "optimizer": "adam"
                 }
-            """.replace('$$$', data_path)
+            }""".replace('$$$', data_path)
         with open(config_path, 'w') as config_file:
             config_file.write(config_json)
 
         serialization_dir = self.TEST_DIR / 'serialization'
 
         # Run train with using the non-allennlp module.
-        sys.argv = ["bin/allennlp",
+        sys.argv = ["allennlp",
                     "train", str(config_path),
                     "-s", str(serialization_dir)]
 

@@ -104,10 +104,10 @@ class _EncoderBase(torch.nn.Module):
             if hidden_state is None:
                 initial_states = hidden_state
             elif isinstance(hidden_state, tuple):
-                initial_states = [state.index_select(1, sorting_indices)[:, :num_valid, :]
+                initial_states = [state.index_select(1, sorting_indices)[:, :num_valid, :].contiguous()
                                   for state in hidden_state]
             else:
-                initial_states = hidden_state.index_select(1, sorting_indices)[:, :num_valid, :]
+                initial_states = hidden_state.index_select(1, sorting_indices)[:, :num_valid, :].contiguous()
 
         else:
             initial_states = self._get_initial_states(batch_size, num_valid, sorting_indices)
@@ -197,12 +197,12 @@ class _EncoderBase(torch.nn.Module):
             # tuple and returns the tensor directly.
             correctly_shaped_state = correctly_shaped_states[0]
             sorted_state = correctly_shaped_state.index_select(1, sorting_indices)
-            return sorted_state[:, :num_valid, :]
+            return sorted_state[:, :num_valid, :].contiguous()
         else:
             # LSTMs have a state tuple of (state, memory).
             sorted_states = [state.index_select(1, sorting_indices)
                              for state in correctly_shaped_states]
-            return tuple(state[:, :num_valid, :] for state in sorted_states)
+            return tuple(state[:, :num_valid, :].contiguous() for state in sorted_states)
 
     def _update_states(self,
                        final_states: RnnStateStorage,

@@ -1,5 +1,5 @@
 import re
-from typing import Sequence, Tuple, List, Optional
+from typing import Sequence, Tuple, Optional, Iterable
 
 import torch
 
@@ -40,13 +40,14 @@ class RegularizerApplicator:
 
         return accumulator
 
+    # Requires custom from_params because of complex logic.
     @classmethod
-    def from_params(cls, params: List[Tuple[str, Params]]) -> Optional['RegularizerApplicator']:
+    def from_params(cls, params: Iterable[Tuple[str, Params]] = ()) -> Optional['RegularizerApplicator']:
         """
         Converts a List of pairs (regex, params) into an RegularizerApplicator.
         This list should look like
 
-        [["regex1": {"type": "l2", "alpha": 0.01}], ["regex2": "l1"]]
+        [["regex1", {"type": "l2", "alpha": 0.01}], ["regex2", "l1"]]
 
         where each parameter receives the penalty corresponding to the first regex
         that matches its name (which may be no regex and hence no penalty).

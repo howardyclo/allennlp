@@ -1,9 +1,7 @@
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, List
 import torch
 
 from allennlp.common.registrable import Registrable
-from allennlp.common.params import Params
-from allennlp.data.vocabulary import Vocabulary
 
 
 class Metric(Registrable):
@@ -28,7 +26,7 @@ class Metric(Registrable):
         """
         raise NotImplementedError
 
-    def get_metric(self, reset: bool) -> Union[float, Tuple[float, ...], Dict[str, float]]:
+    def get_metric(self, reset: bool) -> Union[float, Tuple[float, ...], Dict[str, float], Dict[str, List[float]]]:
         """
         Compute and return the metric. Optionally also call :func:`self.reset`.
         """
@@ -39,13 +37,6 @@ class Metric(Registrable):
         Reset any accumulators or internal state.
         """
         raise NotImplementedError
-
-    @classmethod
-    def from_params(cls, params: Params, vocab: Optional[Vocabulary] = None):
-        metric_type = params.pop_choice("type", cls.list_available())
-        if vocab:
-            params["vocabulary"] = vocab
-        return cls.by_name(metric_type)(**params.as_dict())  # type: ignore
 
     @staticmethod
     def unwrap_to_tensors(*tensors: torch.Tensor):

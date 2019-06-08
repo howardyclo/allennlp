@@ -4,10 +4,10 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.functional import nll_loss
 
-from allennlp.common import Params
 from allennlp.common.checks import check_dimensions_match
 from allennlp.data import Vocabulary
 from allennlp.models.model import Model
+from allennlp.models.reading_comprehension.util import get_best_span
 from allennlp.modules import Highway
 from allennlp.modules import Seq2SeqEncoder, SimilarityFunction, TimeDistributed, TextFieldEmbedder
 from allennlp.modules.matrix_attention.legacy_matrix_attention import LegacyMatrixAttention
@@ -41,7 +41,7 @@ class BidirectionalAttentionFlow(Model):
     phrase_layer : ``Seq2SeqEncoder``
         The encoder (with its own internal stacking) that we will use in between embedding tokens
         and doing the bidirectional attention.
-    attention_similarity_function : ``SimilarityFunction``
+    similarity_function : ``SimilarityFunction``
         The similarity function that we will use when comparing encoded passage and question
         representations.
     modeling_layer : ``Seq2SeqEncoder``
@@ -68,7 +68,7 @@ class BidirectionalAttentionFlow(Model):
                  text_field_embedder: TextFieldEmbedder,
                  num_highway_layers: int,
                  phrase_layer: Seq2SeqEncoder,
-                 attention_similarity_function: SimilarityFunction,
+                 similarity_function: SimilarityFunction,
                  modeling_layer: Seq2SeqEncoder,
                  span_end_encoder: Seq2SeqEncoder,
                  dropout: float = 0.2,
@@ -81,7 +81,7 @@ class BidirectionalAttentionFlow(Model):
         self._highway_layer = TimeDistributed(Highway(text_field_embedder.get_output_dim(),
                                                       num_highway_layers))
         self._phrase_layer = phrase_layer
-        self._matrix_attention = LegacyMatrixAttention(attention_similarity_function)
+        self._matrix_attention = LegacyMatrixAttention(similarity_function)
         self._modeling_layer = modeling_layer
         self._span_end_encoder = span_end_encoder
 
@@ -140,12 +140,11 @@ class BidirectionalAttentionFlow(Model):
             ending position of the answer with the passage.  This is an `inclusive` token index.
             If this is given, we will compute a loss that gets included in the output dictionary.
         metadata : ``List[Dict[str, Any]]``, optional
-            If present, this should contain the question ID, original passage text, and token
-            offsets into the passage for each instance in the batch.  We use this for computing
-            official metrics using the official SQuAD evaluation script.  The length of this list
-            should be the batch size, and each dictionary should have the keys ``id``,
-            ``original_passage``, and ``token_offsets``.  If you only want the best span string and
-            don't care about official metrics, you can omit the ``id`` key.
+            metadata : ``List[Dict[str, Any]]``, optional
+            If present, this should contain the question tokens, passage tokens, original passage
+            text, and token offsets into the passage for each instance in the batch.  The length
+            of this list should be the batch size, and each dictionary should have the keys
+            ``question_tokens``, ``passage_tokens``, ``original_passage``, and ``token_offsets``.
 
         Returns
         -------
@@ -187,7 +186,7 @@ class BidirectionalAttentionFlow(Model):
         # Shape: (batch_size, passage_length, question_length)
         passage_question_similarity = self._matrix_attention(encoded_passage, encoded_question)
         # Shape: (batch_size, passage_length, question_length)
-        passage_question_attention = util.last_dim_softmax(passage_question_similarity, question_mask)
+        passage_question_attention = util.masked_softmax(passage_question_similarity, question_mask)
         # Shape: (batch_size, passage_length, encoding_dim)
         passage_question_vectors = util.weighted_sum(encoded_question, passage_question_attention)
 
@@ -246,7 +245,7 @@ class BidirectionalAttentionFlow(Model):
         span_end_probs = util.masked_softmax(span_end_logits, passage_mask)
         span_start_logits = util.replace_masked_values(span_start_logits, passage_mask, -1e7)
         span_end_logits = util.replace_masked_values(span_end_logits, passage_mask, -1e7)
-        best_span = self.get_best_span(span_start_logits, span_end_logits)
+        best_span = get_best_span(span_start_logits, span_end_logits)
 
         output_dict = {
                 "passage_question_attention": passage_question_attention,
@@ -300,55 +299,26 @@ class BidirectionalAttentionFlow(Model):
 
     @staticmethod
     def get_best_span(span_start_logits: torch.Tensor, span_end_logits: torch.Tensor) -> torch.Tensor:
+        # We call the inputs "logits" - they could either be unnormalized logits or normalized log
+        # probabilities.  A log_softmax operation is a constant shifting of the entire logit
+        # vector, so taking an argmax over either one gives the same result.
         if span_start_logits.dim() != 2 or span_end_logits.dim() != 2:
             raise ValueError("Input shapes must be (batch_size, passage_length)")
         batch_size, passage_length = span_start_logits.size()
-        max_span_log_prob = [-1e20] * batch_size
-        span_start_argmax = [0] * batch_size
-        best_word_span = span_start_logits.new_zeros((batch_size, 2), dtype=torch.long)
+        device = span_start_logits.device
+        # (batch_size, passage_length, passage_length)
+        span_log_probs = span_start_logits.unsqueeze(2) + span_end_logits.unsqueeze(1)
+        # Only the upper triangle of the span matrix is valid; the lower triangle has entries where
+        # the span ends before it starts.
+        span_log_mask = torch.triu(torch.ones((passage_length, passage_length),
+                                              device=device)).log().unsqueeze(0)
+        valid_span_log_probs = span_log_probs + span_log_mask
 
-        span_start_logits = span_start_logits.detach().cpu().numpy()
-        span_end_logits = span_end_logits.detach().cpu().numpy()
-
-        for b in range(batch_size):  # pylint: disable=invalid-name
-            for j in range(passage_length):
-                val1 = span_start_logits[b, span_start_argmax[b]]
-                if val1 < span_start_logits[b, j]:
-                    span_start_argmax[b] = j
-                    val1 = span_start_logits[b, j]
-
-                val2 = span_end_logits[b, j]
-
-                if val1 + val2 > max_span_log_prob[b]:
-                    best_word_span[b, 0] = span_start_argmax[b]
-                    best_word_span[b, 1] = j
-                    max_span_log_prob[b] = val1 + val2
-        return best_word_span
-
-    @classmethod
-    def from_params(cls, vocab: Vocabulary, params: Params) -> 'BidirectionalAttentionFlow':
-        embedder_params = params.pop("text_field_embedder")
-        text_field_embedder = TextFieldEmbedder.from_params(vocab, embedder_params)
-        num_highway_layers = params.pop_int("num_highway_layers")
-        phrase_layer = Seq2SeqEncoder.from_params(params.pop("phrase_layer"))
-        similarity_function = SimilarityFunction.from_params(params.pop("similarity_function"))
-        modeling_layer = Seq2SeqEncoder.from_params(params.pop("modeling_layer"))
-        span_end_encoder = Seq2SeqEncoder.from_params(params.pop("span_end_encoder"))
-        dropout = params.pop_float('dropout', 0.2)
-
-        initializer = InitializerApplicator.from_params(params.pop('initializer', []))
-        regularizer = RegularizerApplicator.from_params(params.pop('regularizer', []))
-
-        mask_lstms = params.pop_bool('mask_lstms', True)
-        params.assert_empty(cls.__name__)
-        return cls(vocab=vocab,
-                   text_field_embedder=text_field_embedder,
-                   num_highway_layers=num_highway_layers,
-                   phrase_layer=phrase_layer,
-                   attention_similarity_function=similarity_function,
-                   modeling_layer=modeling_layer,
-                   span_end_encoder=span_end_encoder,
-                   dropout=dropout,
-                   mask_lstms=mask_lstms,
-                   initializer=initializer,
-                   regularizer=regularizer)
+        # Here we take the span matrix and flatten it, then find the best span using argmax.  We
+        # can recover the start and end indices from this flattened list using simple modular
+        # arithmetic.
+        # (batch_size, passage_length * passage_length)
+        best_spans = valid_span_log_probs.view(batch_size, -1).argmax(-1)
+        span_start_indices = best_spans // passage_length
+        span_end_indices = best_spans % passage_length
+        return torch.stack([span_start_indices, span_end_indices], dim=-1)
